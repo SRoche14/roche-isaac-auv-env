@@ -3,7 +3,7 @@ Compute hydrodynamic forces and torques on a rigid body
 
 Based on the descriptions of the MuJoCo hydrodynamic model: https://mujoco.readthedocs.io/en/3.0.1/computation/fluid.html
 
-Authors: Ethan Fahnestock and Levi "Veevee" Cai (cail@mit.edu)
+Authors: Ethan Fahnestock, Levi "Veevee" Cai (cail@mit.edu), Steven Roche (rochesh@mit.edu)
 """
 
 from dataclasses import dataclass
@@ -65,12 +65,19 @@ class HydrodynamicForceModels:
                                   fluid_density_rho
                                   ):
 
-    ri = self._calculate_inferred_half_dimensions(inertias, masses)
-    rj = torch.roll(ri, 1, 1)
-    rk = torch.roll(ri, -1, 1)
+    model = torch.load('best_model.pt')
+    model.eval()
 
-    forces = -2. * fluid_density_rho * rj * rk * torch.abs(root_linvels_b) * root_linvels_b
-    torques = -0.5 * fluid_density_rho * ri * (torch.pow(rj,4) + torch.pow(rk,4)) * torch.abs(root_angvels_b) * root_angvels_b
+    predictions = model(root_linvels_b)
+    forces = predictions[:, :3]
+    torques = predictions[:, 3:]
+    ## The commented out code is how forces and torques were calculated prior to introducing the neural networks
+    # ri = self._calculate_inferred_half_dimensions(inertias, masses)
+    # rj = torch.roll(ri, 1, 1)
+    # rk = torch.roll(ri, -1, 1)
+
+    # forces = -2. * fluid_density_rho * rj * rk * torch.abs(root_linvels_b) * root_linvels_b
+    # torques = -0.5 * fluid_density_rho * ri * (torch.pow(rj,4) + torch.pow(rk,4)) * torch.abs(root_angvels_b) * root_angvels_b
 
     return (forces, torques)
 
