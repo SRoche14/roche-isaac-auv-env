@@ -374,16 +374,16 @@ class DragMLPAngular():
                 - nn.Sequential: The constructed MLP model.
             """
             return nn.Sequential(
-                nn.Linear(input_size, 2048),
-                nn.ELU(alpha=1.0, inplace=False),
-                nn.Linear(2048, 2048),
-                nn.ELU(alpha=1.0, inplace=False),
-                nn.Linear(2048, output_size)
+                nn.Linear(input_size, 256),
+                nn.ReLU(),
+                # nn.Linear(256, 128),
+                # nn.ReLU(),
+                nn.Linear(256, output_size)
             )
 
         model = make_mlp(INPUT_SIZE, OUTPUT_SIZE)
         criterion = nn.MSELoss()
-        optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
+        optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
 
         train_losses = []
         val_losses = []
@@ -482,22 +482,28 @@ def main():
     """
     # Parameters
     DATA_PATH_LINEAR = ['dragData.txt', 'dragData2.txt', 'dragData3.csv']
-    DATA_PATH_ANGULAR = ['AngVelAndTorque.csv']  # CSV/TXT files
+    DATA_PATH_ANGULAR = ['AngVelAndTorque.csv', 'AngVelAndTorque2.csv']  # CSV/TXT files
     INPUT_SIZE = 3
     OUTPUT_SIZE = 6
-    BATCH_SIZE = 50
-    EPOCHS = 200
-    LEARNING_RATE = 1e-5
+    BATCH_SIZE_LINEAR = 50
+    EPOCHS_LINEAR = 400
+    LEARNING_RATE_LINEAR = 3e-4
+
+    BATCH_SIZE_ANGULAR = 50
+    EPOCHS_ANGULAR = 400
+    LEARNING_RATE_ANGULAR = 2e-4
     VAL_SIZE = 0.10
     TEST_SIZE = .10/0.90 # 10% of the remaining data after validation split
 
-    # drag_mlp_linear = DragMLPLinear(DATA_PATH_LINEAR, INPUT_SIZE, OUTPUT_SIZE, BATCH_SIZE, EPOCHS, LEARNING_RATE, VAL_SIZE, TEST_SIZE)
+    drag_mlp_linear = DragMLPLinear(DATA_PATH_LINEAR, INPUT_SIZE, OUTPUT_SIZE, BATCH_SIZE_LINEAR, 
+                                    EPOCHS_LINEAR, LEARNING_RATE_LINEAR, VAL_SIZE, TEST_SIZE)
     # drag_mlp_linear.train_mlp()
     # uncomment to avoid evaluating on the test dataset
-    # drag_mlp_linear.test_mlp()
-    drag_mlp_angular = DragMLPAngular(DATA_PATH_ANGULAR, INPUT_SIZE, OUTPUT_SIZE, BATCH_SIZE, EPOCHS, LEARNING_RATE, VAL_SIZE, TEST_SIZE)
-    drag_mlp_angular.train_mlp()
-    drag_mlp_angular.test_mlp()
+    drag_mlp_linear.test_mlp()
+    # drag_mlp_angular = DragMLPAngular(DATA_PATH_ANGULAR, INPUT_SIZE, OUTPUT_SIZE, 
+    #                                     BATCH_SIZE_ANGULAR, EPOCHS_ANGULAR, LEARNING_RATE_ANGULAR, VAL_SIZE, TEST_SIZE)
+    # drag_mlp_angular.train_mlp()
+    # drag_mlp_angular.test_mlp()
 
 
 if __name__ == "__main__":
