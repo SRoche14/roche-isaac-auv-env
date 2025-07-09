@@ -65,11 +65,11 @@ class HydrodynamicForceModels:
                                   fluid_density_rho
                                   ):
 
-    model_linear = torch.load('/home/warp/isaacsim4.5/IsaacLab/roche-isaac-auv-env/best_model_linear.pt').to('cuda')
+    model_linear = torch.load('/PATH/TO/best_model_linear.pt').to('cuda')
     model_linear.eval()
 
 
-    model_angular = torch.load('/home/warp/isaacsim4.5/IsaacLab/roche-isaac-auv-env/best_model_angular.pt').to('cuda')
+    model_angular = torch.load('/PATH/TO/best_model_angular.pt').to('cuda')
     model_angular.eval()
 
     predictions_linear = model_linear(root_linvels_b)
