@@ -67,9 +67,12 @@ class WarpAUVEnvCfg(DirectRLEnvCfg):
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4, env_spacing=4.0, replicate_physics=True)
     debug_vis = True
 
+
     observation_space: gym.spaces.Space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(17,), dtype=np.float64)
     action_space: gym.spaces.Space = gym.spaces.Box(low=-1.0, high=1.0, shape=(6,), dtype=np.float64)
     state_space: gym.spaces.Space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(17,), dtype=np.float64)
+
+
     # env
     decimation = 2
     cap_episode_length = True
@@ -88,7 +91,7 @@ class WarpAUVEnvCfg(DirectRLEnvCfg):
     goal_dims = 4
     eval_mode = False
 
-    goal_spawn_radius = 2.0
+    goal_spawn_radius = 8.0
     init_guidance_rate = 0.1
     init_vel_max = 1.0
 
@@ -198,7 +201,6 @@ class WarpAUVEnv(DirectRLEnv):
         
         # Set initial goals
         self._reset_idx(self._robot._ALL_INDICES)
-
 
     def _init_thruster_dynamics(self):
         if type(self.cfg.com_to_cob_offset) != torch.Tensor:
@@ -405,9 +407,25 @@ class WarpAUVEnv(DirectRLEnv):
         if self._debug: print("motorValues: ", motorValues)
 
         # convert the PWM commands to rad/s using method in https://gitlab.com/warplab/ros/warpauv/warpauv_simulation/-/blob/master/src/robot_sim_interface.py
-        motorValues[torch.abs(motorValues) < 0.08] = 0 
-        motorValues[motorValues >= 0.08] = -139.0 * (torch.pow(motorValues[motorValues >= 0.08], 2.0)) + 500 * motorValues[motorValues >= 0.08] + 8.28
-        motorValues[motorValues <= -0.08] = 161.0 * (torch.pow(motorValues[motorValues <= -0.08], 2.0)) + 517.86 * motorValues[motorValues <= -0.08] - 5.72
+        
+        #Artificially include thruster imbalance coefficients for thruster 1 and 2
+        b_bias = 0.50
+        
+        # Zero small values
+        motorValues[torch.abs(motorValues) < 0.08] = 0
+
+        # Forward bias to all thrusters
+        mask_fwd = motorValues >= 0.08
+        motorValues[mask_fwd] = -139.0 * torch.pow(motorValues[mask_fwd], 2.0) + 500 * motorValues[mask_fwd] + 8.28
+
+        #Extra Backward bias on thruster2 1 and 2
+        mask_back_12 = motorValues[:, 0:2] <= -0.08
+        motorValues[:, 0:2][mask_back_12] = b_bias * (161.0 * torch.pow(motorValues[:, 0:2][mask_back_12], 2.0) + 517.86 * motorValues[:, 0:2][mask_back_12] - 5.72)
+
+        #Normal Backward bias on thruster 3-6
+        mask_back_36 = motorValues[:, 2:6] <= -0.08
+        motorValues[:, 2:6][mask_back_36] = ( 161.0 * torch.pow(motorValues[:, 2:6][mask_back_36], 2.0) + 517.86 * motorValues[:, 2:6][mask_back_36] - 5.72)
+
 
         # get the current motor velocities using thruster dynamics
         # TODO: CHECK THAT SIM DT IS CORRECT HERE

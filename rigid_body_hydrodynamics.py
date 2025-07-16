@@ -65,12 +65,26 @@ class HydrodynamicForceModels:
                                   fluid_density_rho
                                   ):
 
-    model = torch.load('best_model.pt')
-    model.eval()
+    model_linear = torch.load('/PATH/TO/best_model_linear.pt').to('cuda')
+    model_linear.eval()
 
-    predictions = model(root_linvels_b)
-    forces = predictions[:, :3]
-    torques = predictions[:, 3:]
+
+    model_angular = torch.load('/PATH/TO/best_model_angular.pt').to('cuda')
+    model_angular.eval()
+
+    predictions_linear = model_linear(root_linvels_b)
+    forces_linear = predictions_linear[:, :3]
+    torques_linear = predictions_linear[:, 3:]
+
+    predictions_angular = model_angular(root_angvels_b)
+    forces_angular = predictions_angular[:, :3]
+    torques_angular = predictions_angular[:, 3:]
+
+    try:
+        forces = forces_linear + forces_angular
+        torques = torques_linear + torques_angular
+    except:
+        print(f"ERROR - calculat_quadratic_drag_forces(). Linear and angular velocities are of differing shape.")
     ## The commented out code is how forces and torques were calculated prior to introducing the neural networks
     # ri = self._calculate_inferred_half_dimensions(inertias, masses)
     # rj = torch.roll(ri, 1, 1)
