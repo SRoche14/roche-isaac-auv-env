@@ -15,7 +15,7 @@ from isaaclab_rl.rsl_rl import (
 @configclass
 class WarpAUVPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
-    max_iterations = 400
+    max_iterations = 2500
     save_interval = 50
     experiment_name = "warpauv_direct"
     empirical_normalization = False

@@ -146,9 +146,11 @@ class DragMLPLinear():
                 - nn.Sequential: The constructed MLP model.
             """
             return nn.Sequential(
-                nn.Linear(input_size, 256),
+                nn.Linear(input_size, 1024),
                 nn.ReLU(),
-                nn.Linear(256, output_size)
+                nn.Linear(1024, 1024),
+                nn.ReLU(),
+                nn.Linear(1024, output_size)
             )
 
         model = make_mlp(INPUT_SIZE, OUTPUT_SIZE)
@@ -197,8 +199,6 @@ class DragMLPLinear():
         fig.add_trace(go.Scatter(y=val_losses, mode='lines', name='Validation Loss'))
         fig.update_layout(title='Training and Validation Loss', xaxis_title='Epoch', yaxis_title='MSE Loss')
         fig.show()
-
-        # self.find_highest_error_lines(model, train_loader, val_loader, scaler_y, top_n=5)
 
     def test_mlp(self):
         """
@@ -428,8 +428,6 @@ class DragMLPAngular():
         fig.update_layout(title='Training and Validation Loss', xaxis_title='Epoch', yaxis_title='MSE Loss')
         fig.show()
 
-        # self.find_highest_error_lines(model, train_loader, val_loader, scaler_y, top_n=5)
-
     def test_mlp(self):
         """
         Test the MLP model on the test set.
@@ -476,13 +474,13 @@ class DragMLPAngular():
         )
         fig.show()
 
-def main():
+def main(linear=False, train=False, test=False):
     """
     Main entry point for the script. Sets default parameters and calls the training function.
     """
     # Parameters
-    DATA_PATH_LINEAR = ['dragData.txt', 'dragData2.txt', 'dragData3.csv']
-    DATA_PATH_ANGULAR = ['AngVelAndTorque.csv', 'AngVelAndTorque2.csv']  # CSV/TXT files
+    DATA_PATH_LINEAR = ['curee_full_model/7-15LinData.csv', 'curee_full_model/7-16LinData.csv']
+    DATA_PATH_ANGULAR = ['curee_full_model/NewAngularResults.csv']  # CSV/TXT files
     INPUT_SIZE = 3
     OUTPUT_SIZE = 6
     BATCH_SIZE_LINEAR = 50
@@ -495,16 +493,24 @@ def main():
     VAL_SIZE = 0.10
     TEST_SIZE = .10/0.90 # 10% of the remaining data after validation split
 
-    drag_mlp_linear = DragMLPLinear(DATA_PATH_LINEAR, INPUT_SIZE, OUTPUT_SIZE, BATCH_SIZE_LINEAR, 
-                                    EPOCHS_LINEAR, LEARNING_RATE_LINEAR, VAL_SIZE, TEST_SIZE)
-    # drag_mlp_linear.train_mlp()
-    # uncomment to avoid evaluating on the test dataset
-    drag_mlp_linear.test_mlp()
-    # drag_mlp_angular = DragMLPAngular(DATA_PATH_ANGULAR, INPUT_SIZE, OUTPUT_SIZE, 
-    #                                     BATCH_SIZE_ANGULAR, EPOCHS_ANGULAR, LEARNING_RATE_ANGULAR, VAL_SIZE, TEST_SIZE)
-    # drag_mlp_angular.train_mlp()
-    # drag_mlp_angular.test_mlp()
+    if linear:
+
+        drag_mlp_linear = DragMLPLinear(DATA_PATH_LINEAR, INPUT_SIZE, OUTPUT_SIZE, BATCH_SIZE_LINEAR, 
+                                        EPOCHS_LINEAR, LEARNING_RATE_LINEAR, VAL_SIZE, TEST_SIZE)
+        if train:
+            drag_mlp_linear.train_mlp()
+
+        if test:
+            drag_mlp_linear.test_mlp()
+    else:
+        drag_mlp_angular = DragMLPAngular(DATA_PATH_ANGULAR, INPUT_SIZE, OUTPUT_SIZE, 
+                                            BATCH_SIZE_ANGULAR, EPOCHS_ANGULAR, LEARNING_RATE_ANGULAR, VAL_SIZE, TEST_SIZE)
+        if train:
+            drag_mlp_angular.train_mlp()
+        
+        if test:
+            drag_mlp_angular.test_mlp()
 
 
 if __name__ == "__main__":
-    main() 
+    main(linear=True, train=False, test=True) 

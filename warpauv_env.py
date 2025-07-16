@@ -73,7 +73,7 @@ class WarpAUVEnvCfg(DirectRLEnvCfg):
     # env
     decimation = 2
     cap_episode_length = True
-    episode_length_s = 3.0
+    episode_length_s = 6.0
     episode_length_before_reset = None
     num_actions = 6
     num_observations = 17
