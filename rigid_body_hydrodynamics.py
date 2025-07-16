@@ -108,7 +108,10 @@ class HydrodynamicForceModels:
     r_eq = r_eq.repeat(1,3)
     forces = -6. * fluid_viscosity_beta * torch.pi * r_eq * root_linvels_b
     torques = -8. * fluid_viscosity_beta * torch.pi * torch.pow(r_eq, 3) * root_angvels_b
-    return (forces, torques)
+
+    forces_zero = torch.zeros_like(forces)
+    torques_zero = torch.zeros_like(torques)
+    return (forces_zero, torques_zero)
 
   def calculate_density_and_viscosity_forces(self, 
                                              root_quats_w: torch.tensor,
