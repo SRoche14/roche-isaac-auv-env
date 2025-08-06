@@ -16,6 +16,7 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 import plotly.graph_objects as go
+import matplotlib.pyplot as plt
 
 
 class DragMLPLinear():
@@ -59,20 +60,21 @@ class DragMLPLinear():
         # header format: v, x, y, z, Fx, Fy, Fz, Mx, My, Mz
         for index, path in enumerate(DATA_PATH):
             dataframe = pd.read_csv(path)
-            if index == 0:
-                # 1, 709, 440, 1995
-                dataframe.drop([1995], axis=0, inplace=True)
-            if index == 1:
-                print(dataframe.iloc[[27,2070]])
-                dataframe.drop([27, 2070], axis=0, inplace=True)
-            if index == 2:
-                print(dataframe.iloc[[1177]])
-                dataframe.drop([1177], axis=0, inplace=True)
+            # if index == 0:
+            #     # 1, 709, 440, 1995
+            #     dataframe.drop([1995], axis=0, inplace=True)
+            # if index == 1:
+            #     print(dataframe.iloc[[27,2070]])
+            #     dataframe.drop([27, 2070], axis=0, inplace=True)
+            # if index == 2:
+            #     print(dataframe.iloc[[1177]])
+            #     dataframe.drop([1177], axis=0, inplace=True)
             # remove velocity magnitude
             dataframe.drop(columns=['v'], inplace=True)
             dataframes.append(dataframe)
 
         X = np.concatenate([df.iloc[:, :INPUT_SIZE].values.astype(np.float32) for df in dataframes])
+        print(X.shape)
         y = np.concatenate([df.iloc[:, INPUT_SIZE:INPUT_SIZE+OUTPUT_SIZE].values.astype(np.float32) for df in dataframes])
 
         # Train/val/test split (70/15/15)
@@ -88,6 +90,22 @@ class DragMLPLinear():
         y_train = scaler_y.transform(y_train)
         y_val = scaler_y.transform(y_val)
         y_test = scaler_y.transform(y_test)
+
+        # Plot the entire training dataset by feature (6 plots, one for each output feature)
+        
+        # features_list = ['Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz']
+        # input_features = ['x', 'y', 'z']
+        # fig, axs = plt.subplots(2, 3, figsize=(18, 10))
+        # axs = axs.flatten()
+        # for i in range(6):
+        #     for j in range(3):
+        #         axs[i].scatter(X_train[:, j], y_train[:, i], alpha=0.3, label=f'{input_features[j]} vs {features_list[i]}')
+        #     axs[i].set_xlabel('Input Feature Value (standardized)')
+        #     axs[i].set_ylabel(f'{features_list[i]} (standardized)')
+        #     axs[i].set_title(f'Training Data: {features_list[i]} vs Inputs')
+        #     axs[i].legend()
+        # plt.tight_layout()
+        # plt.show()
 
         # PyTorch Dataset
         class DragDataset(Dataset):
@@ -146,11 +164,15 @@ class DragMLPLinear():
                 - nn.Sequential: The constructed MLP model.
             """
             return nn.Sequential(
-                nn.Linear(input_size, 1024),
+                nn.Linear(input_size, 512),
                 nn.ReLU(),
-                nn.Linear(1024, 1024),
+                # nn.Dropout(p=0.05),
+                nn.Linear(512, 512),
                 nn.ReLU(),
-                nn.Linear(1024, output_size)
+                # nn.Dropout(p=0.05),
+                # nn.Linear(1024, 512),
+                # nn.ReLU(),
+                nn.Linear(512, output_size)
             )
 
         model = make_mlp(INPUT_SIZE, OUTPUT_SIZE)
@@ -191,7 +213,7 @@ class DragMLPLinear():
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 torch.save(model, 'best_model_linear.pt')
-                print(f"Best model saved at epoch {epoch+1} with val loss {val_loss:.4f}")
+                print(f"Best linear model saved at epoch {epoch+1} with val loss {val_loss:.4f}")
 
         # 7. Plot training and validation loss
         fig = go.Figure()
@@ -317,6 +339,22 @@ class DragMLPAngular():
         y_val = scaler_y.transform(y_val)
         y_test = scaler_y.transform(y_test)
 
+        # Plot the entire training dataset by feature (6 plots, one for each output feature)
+        import matplotlib.pyplot as plt
+        features_list = ['Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz']
+        input_features = ['x', 'y', 'z']
+        fig, axs = plt.subplots(2, 3, figsize=(18, 10))
+        axs = axs.flatten()
+        for i in range(6):
+            for j in range(3):
+                axs[i].scatter(X_train[:, j], y_train[:, i], alpha=0.3, label=f'{input_features[j]} vs {features_list[i]}')
+            axs[i].set_xlabel('Input Feature Value (standardized)')
+            axs[i].set_ylabel(f'{features_list[i]} (standardized)')
+            axs[i].set_title(f'Training Data: {features_list[i]} vs Inputs')
+            axs[i].legend()
+        plt.tight_layout()
+        plt.show()
+
         # PyTorch Dataset
         class DragDataset(Dataset):
             def __init__(self, X, y):
@@ -361,6 +399,7 @@ class DragMLPAngular():
         EPOCHS = self.epochs 
         LEARNING_RATE = self.learning_rate 
 
+
         # Simple MLP Model 
         def make_mlp(input_size, output_size):
             """
@@ -374,11 +413,11 @@ class DragMLPAngular():
                 - nn.Sequential: The constructed MLP model.
             """
             return nn.Sequential(
-                nn.Linear(input_size, 256),
+                nn.Linear(input_size, 1024),
                 nn.ReLU(),
                 # nn.Linear(256, 128),
                 # nn.ReLU(),
-                nn.Linear(256, output_size)
+                nn.Linear(1024, output_size)
             )
 
         model = make_mlp(INPUT_SIZE, OUTPUT_SIZE)
@@ -419,7 +458,7 @@ class DragMLPAngular():
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 torch.save(model, 'best_model_angular.pt')
-                print(f"Best model saved at epoch {epoch+1} with val loss {val_loss:.4f}")
+                print(f"Best angular model saved at epoch {epoch+1} with val loss {val_loss:.4f}")
 
         # 7. Plot training and validation loss
         fig = go.Figure()
@@ -479,13 +518,14 @@ def main(linear=False, train=False, test=False):
     Main entry point for the script. Sets default parameters and calls the training function.
     """
     # Parameters
-    DATA_PATH_LINEAR = ['curee_full_model/7-15LinData.csv', 'curee_full_model/7-16LinData.csv']
+    DATA_PATH_LINEAR = ['curee_full_model/7-15LinData.csv', 'curee_full_model/7-16lindata.csv', 'curee_full_model/7-17lindata.csv', 'curee_full_model/7-22lindata.csv', 
+                        'curee_full_model/8-5lindata.csv', 'curee_full_model/8-6lindata.csv']
     DATA_PATH_ANGULAR = ['curee_full_model/NewAngularResults.csv']  # CSV/TXT files
     INPUT_SIZE = 3
     OUTPUT_SIZE = 6
     BATCH_SIZE_LINEAR = 50
-    EPOCHS_LINEAR = 400
-    LEARNING_RATE_LINEAR = 3e-4
+    EPOCHS_LINEAR = 700
+    LEARNING_RATE_LINEAR = 2e-3
 
     BATCH_SIZE_ANGULAR = 50
     EPOCHS_ANGULAR = 400
@@ -494,7 +534,7 @@ def main(linear=False, train=False, test=False):
     TEST_SIZE = .10/0.90 # 10% of the remaining data after validation split
 
     if linear:
-
+        print(f"Setting Applied: Linear Model")
         drag_mlp_linear = DragMLPLinear(DATA_PATH_LINEAR, INPUT_SIZE, OUTPUT_SIZE, BATCH_SIZE_LINEAR, 
                                         EPOCHS_LINEAR, LEARNING_RATE_LINEAR, VAL_SIZE, TEST_SIZE)
         if train:
@@ -503,6 +543,7 @@ def main(linear=False, train=False, test=False):
         if test:
             drag_mlp_linear.test_mlp()
     else:
+        print(f"Setting Applied: Angular Model")
         drag_mlp_angular = DragMLPAngular(DATA_PATH_ANGULAR, INPUT_SIZE, OUTPUT_SIZE, 
                                             BATCH_SIZE_ANGULAR, EPOCHS_ANGULAR, LEARNING_RATE_ANGULAR, VAL_SIZE, TEST_SIZE)
         if train:
@@ -513,4 +554,4 @@ def main(linear=False, train=False, test=False):
 
 
 if __name__ == "__main__":
-    main(linear=True, train=False, test=True) 
+    main(linear=True, train=True, test=False) 
