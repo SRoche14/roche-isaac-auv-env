@@ -11,6 +11,8 @@ from typing import Tuple
 from isaaclab.utils.math import quat_conjugate, quat_inv, quat_apply, convert_quat
 import numpy as np 
 import torch 
+import os
+import joblib
 
 @dataclass
 class HydrodynamicForceModels:
@@ -36,7 +38,7 @@ class HydrodynamicForceModels:
     buoyancy_directions_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float)
     buoyancy_directions_w[..., 2] = 1.0 # opposing gravity vector in the world frame
     
-    if self.debug: print(f"shape of root_quats: {root_quats.shape}, shape of buoyancy_vectors: {buoyancy_vectors_w.shape}")
+    if self.debug: print(f"shape of root_quats: {root_quats_w.shape}, shape of buoyancy_vectors: {buoyancy_directions_w.shape}")
 
     buoyancy_directions_b = quat_apply(quat_conjugate(root_quats_w), buoyancy_directions_w)
 
@@ -65,26 +67,62 @@ class HydrodynamicForceModels:
                                   fluid_density_rho
                                   ):
 
-    model_linear = torch.load('/PATH/TO/best_model_linear.pt').to('cuda')
+    # Resolve file paths relative to this file's directory
+    base_dir = os.path.dirname(__file__)
+    linear_model_path = os.path.join(base_dir, 'temp_best_models', 'best_model_linear.pt')
+    angular_model_path = os.path.join(base_dir, 'temp_best_models', 'best_model_angular.pt')
+    linear_scaler_X_path = os.path.join(base_dir, 'temp_best_models', 'scaler_X_linear.pkl')
+    linear_scaler_y_path = os.path.join(base_dir, 'temp_best_models', 'scaler_y_linear.pkl')
+    angular_scaler_X_path = os.path.join(base_dir, 'temp_best_models', 'scaler_X_angular.pkl')
+    angular_scaler_y_path = os.path.join(base_dir, 'temp_best_models', 'scaler_y_angular.pkl')
+
+    # Load models on the correct device
+    model_linear = torch.load(linear_model_path, map_location=self.device)
     model_linear.eval()
-
-
-    model_angular = torch.load('/PATH/TO/best_model_angular.pt').to('cuda')
+    model_angular = torch.load(angular_model_path, map_location=self.device)
     model_angular.eval()
 
-    predictions_linear = model_linear(root_linvels_b)
-    forces_linear = predictions_linear[:, :3]
-    torques_linear = predictions_linear[:, 3:]
+    # Load scalers; if missing, raise informative error
+    if not (os.path.exists(linear_scaler_X_path) and os.path.exists(linear_scaler_y_path)):
+      raise FileNotFoundError(f"Missing linear scalers. Expected at {linear_scaler_X_path} and {linear_scaler_y_path}")
+    if not (os.path.exists(angular_scaler_X_path) and os.path.exists(angular_scaler_y_path)):
+      raise FileNotFoundError(f"Missing angular scalers. Expected at {angular_scaler_X_path} and {angular_scaler_y_path}")
 
-    predictions_angular = model_angular(root_angvels_b)
-    forces_angular = predictions_angular[:, :3]
-    torques_angular = predictions_angular[:, 3:]
+    scaler_X_linear = joblib.load(linear_scaler_X_path)
+    scaler_y_linear = joblib.load(linear_scaler_y_path)
+    scaler_X_angular = joblib.load(angular_scaler_X_path)
+    scaler_y_angular = joblib.load(angular_scaler_y_path)
 
-    try:
-        forces = forces_linear + forces_angular
-        torques = torques_linear + torques_angular
-    except:
-        print(f"ERROR - calculat_quadratic_drag_forces(). Linear and angular velocities are of differing shape.")
+    # Standardize inputs using training scalers
+    lin_np = root_linvels_b.detach().to('cpu').numpy()
+    ang_np = root_angvels_b.detach().to('cpu').numpy()
+    lin_std_np = scaler_X_linear.transform(lin_np)
+    ang_std_np = scaler_X_angular.transform(ang_np)
+    lin_std = torch.from_numpy(lin_std_np).to(self.device).type_as(root_linvels_b)
+    ang_std = torch.from_numpy(ang_std_np).to(self.device).type_as(root_angvels_b)
+
+    # Predict in standardized space
+    with torch.no_grad():
+      pred_lin_std = model_linear(lin_std)
+      pred_ang_std = model_angular(ang_std)
+
+    # Move to CPU and inverse-transform to physical units
+    pred_lin_std_np = pred_lin_std.detach().to('cpu').numpy()
+    pred_ang_std_np = pred_ang_std.detach().to('cpu').numpy()
+    pred_lin_np = scaler_y_linear.inverse_transform(pred_lin_std_np)
+    pred_ang_np = scaler_y_angular.inverse_transform(pred_ang_std_np)
+
+    pred_lin = torch.from_numpy(pred_lin_np).to(self.device).type_as(root_linvels_b)
+    pred_ang = torch.from_numpy(pred_ang_np).to(self.device).type_as(root_angvels_b)
+
+    # Split into forces and torques per model and combine
+    forces_linear = pred_lin[:, :3]
+    torques_linear = pred_lin[:, 3:]
+    forces_angular = pred_ang[:, :3]
+    torques_angular = pred_ang[:, 3:]
+
+    forces = forces_linear + forces_angular
+    torques = torques_linear + torques_angular
     ## The commented out code is how forces and torques were calculated prior to introducing the neural networks
     # ri = self._calculate_inferred_half_dimensions(inertias, masses)
     # rj = torch.roll(ri, 1, 1)

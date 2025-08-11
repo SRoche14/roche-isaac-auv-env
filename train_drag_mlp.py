@@ -17,6 +17,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
+import joblib
+import os
 
 
 class DragMLPLinear():
@@ -30,7 +32,7 @@ class DragMLPLinear():
         self.test_size = test_size
         self.data_path = data_path
 
-    def load_data(self):
+    def load_data(self, fit_scalers: bool = True):
         """
         Parameters:
             data_path (str): Path to the CSV data file.
@@ -81,9 +83,20 @@ class DragMLPLinear():
         X_temp, X_test, y_temp, y_test = train_test_split(X, y, test_size=VAL_SIZE, shuffle=True, random_state=42)
         X_train, X_val, y_train, y_val = train_test_split(X_temp, y_temp, test_size=TEST_SIZE, shuffle=True, random_state=42)
 
-        # Standardize features 
-        scaler_X = StandardScaler().fit(X_train)
-        scaler_y = StandardScaler().fit(y_train)
+        # Standardize features
+        if fit_scalers:
+            scaler_X = StandardScaler().fit(X_train)
+            scaler_y = StandardScaler().fit(y_train)
+            # persist to instance for saving later
+            self.scaler_X = scaler_X
+            self.scaler_y = scaler_y
+        else:
+            # use pre-fitted scalers stored on instance
+            scaler_X = getattr(self, 'scaler_X', None)
+            scaler_y = getattr(self, 'scaler_y', None)
+            if scaler_X is None or scaler_y is None:
+                raise ValueError("Scalers not set. Load or fit scalers before calling load_data(fit_scalers=False).")
+
         X_train = scaler_X.transform(X_train)
         X_val = scaler_X.transform(X_val)
         X_test = scaler_X.transform(X_test)
@@ -95,15 +108,16 @@ class DragMLPLinear():
         
         # features_list = ['Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz']
         # input_features = ['x', 'y', 'z']
-        # fig, axs = plt.subplots(2, 3, figsize=(18, 10))
+        # fig, axs = plt.subplots(3, 6, figsize=(18, 10))
         # axs = axs.flatten()
-        # for i in range(6):
-        #     for j in range(3):
-        #         axs[i].scatter(X_train[:, j], y_train[:, i], alpha=0.3, label=f'{input_features[j]} vs {features_list[i]}')
-        #     axs[i].set_xlabel('Input Feature Value (standardized)')
-        #     axs[i].set_ylabel(f'{features_list[i]} (standardized)')
-        #     axs[i].set_title(f'Training Data: {features_list[i]} vs Inputs')
-        #     axs[i].legend()
+        # for i in range(3):
+        #     for j in range(6):
+        #         index = i * 6 + j
+        #         axs[index].scatter(X_train[:, i], y_train[:, j], alpha=0.3, label=f'{input_features[i]} vs {features_list[j]}')
+        #         axs[index].set_xlabel('Input Feature Value (standardized)')
+        #         axs[index].set_ylabel(f'{features_list[j]} (standardized)')
+        #         axs[index].set_title(f'Training Data: {features_list[j]} vs {input_features[i]}')
+        #         axs[index].legend()
         # plt.tight_layout()
         # plt.show()
 
@@ -145,7 +159,7 @@ class DragMLPLinear():
             - Optionally evaluates and prints test set loss after training.
         """
 
-        train_ds, val_ds, _, train_loader, val_loader, _, scaler_y = self.load_data()
+        train_ds, val_ds, _, train_loader, val_loader, _, scaler_y = self.load_data(fit_scalers=True)
         INPUT_SIZE = self.input_size 
         OUTPUT_SIZE = self.output_size 
         EPOCHS = self.epochs 
@@ -164,10 +178,10 @@ class DragMLPLinear():
                 - nn.Sequential: The constructed MLP model.
             """
             return nn.Sequential(
-                nn.Linear(input_size, 512),
+                nn.Linear(input_size, 1024),
                 nn.ReLU(),
                 # nn.Dropout(p=0.05),
-                nn.Linear(512, 512),
+                nn.Linear(1024, 512),
                 nn.ReLU(),
                 # nn.Dropout(p=0.05),
                 # nn.Linear(1024, 512),
@@ -212,7 +226,12 @@ class DragMLPLinear():
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                torch.save(model, 'best_model_linear.pt')
+                os.makedirs('./temp_best_models', exist_ok=True)
+                torch.save(model, './temp_best_models/best_model_linear.pt')
+                # save the fitted scalers alongside the model
+                if hasattr(self, 'scaler_X') and hasattr(self, 'scaler_y'):
+                    joblib.dump(self.scaler_X, './temp_best_models/scaler_X_linear.pkl')
+                    joblib.dump(self.scaler_y, './temp_best_models/scaler_y_linear.pkl')
                 print(f"Best linear model saved at epoch {epoch+1} with val loss {val_loss:.4f}")
 
         # 7. Plot training and validation loss
@@ -229,8 +248,12 @@ class DragMLPLinear():
         Returns:
             - float: The test set loss, and plot of predicted vs actual values
         """
-        _, _, _, _, _, test_loader, scaler_y = self.load_data()
-        model = torch.load('best_model_linear.pt')
+        # load persisted model and scalers
+        model = torch.load('./temp_best_models/best_model_linear.pt')
+        self.scaler_X = joblib.load('./temp_best_models/scaler_X_linear.pkl')
+        self.scaler_y = joblib.load('./temp_best_models/scaler_y_linear.pkl')
+        # reload data using the persisted scalers to ensure consistent transforms
+        _, _, _, _, _, test_loader, _ = self.load_data(fit_scalers=False)
         model.eval() 
         all_preds = []
         all_targets = []
@@ -245,8 +268,8 @@ class DragMLPLinear():
         all_targets = np.concatenate(all_targets) 
 
         # Inverse transform to original scale
-        all_preds_orig = scaler_y.inverse_transform(all_preds)
-        all_targets_orig = scaler_y.inverse_transform(all_targets)
+        all_preds_orig = self.scaler_y.inverse_transform(all_preds)
+        all_targets_orig = self.scaler_y.inverse_transform(all_targets)
 
         # Compute errors for each feature
         # shape: (num_samples, num_outputs)
@@ -279,7 +302,7 @@ class DragMLPAngular():
         self.test_size = test_size
         self.data_path = data_path
 
-    def load_data(self):
+    def load_data(self, fit_scalers: bool = True):
         """
         Parameters:
             data_path (str): Path to the CSV data file.
@@ -329,9 +352,18 @@ class DragMLPAngular():
         X_temp, X_test, y_temp, y_test = train_test_split(X, y, test_size=VAL_SIZE, shuffle=True, random_state=42)
         X_train, X_val, y_train, y_val = train_test_split(X_temp, y_temp, test_size=TEST_SIZE, shuffle=True, random_state=42)
 
-        # Standardize features 
-        scaler_X = StandardScaler().fit(X_train)
-        scaler_y = StandardScaler().fit(y_train)
+        # Standardize features
+        if fit_scalers:
+            scaler_X = StandardScaler().fit(X_train)
+            scaler_y = StandardScaler().fit(y_train)
+            self.scaler_X = scaler_X
+            self.scaler_y = scaler_y
+        else:
+            scaler_X = getattr(self, 'scaler_X', None)
+            scaler_y = getattr(self, 'scaler_y', None)
+            if scaler_X is None or scaler_y is None:
+                raise ValueError("Scalers not set. Load or fit scalers before calling load_data(fit_scalers=False).")
+
         X_train = scaler_X.transform(X_train)
         X_val = scaler_X.transform(X_val)
         X_test = scaler_X.transform(X_test)
@@ -340,20 +372,21 @@ class DragMLPAngular():
         y_test = scaler_y.transform(y_test)
 
         # Plot the entire training dataset by feature (6 plots, one for each output feature)
-        import matplotlib.pyplot as plt
-        features_list = ['Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz']
-        input_features = ['x', 'y', 'z']
-        fig, axs = plt.subplots(2, 3, figsize=(18, 10))
-        axs = axs.flatten()
-        for i in range(6):
-            for j in range(3):
-                axs[i].scatter(X_train[:, j], y_train[:, i], alpha=0.3, label=f'{input_features[j]} vs {features_list[i]}')
-            axs[i].set_xlabel('Input Feature Value (standardized)')
-            axs[i].set_ylabel(f'{features_list[i]} (standardized)')
-            axs[i].set_title(f'Training Data: {features_list[i]} vs Inputs')
-            axs[i].legend()
-        plt.tight_layout()
-        plt.show()
+        # import matplotlib.pyplot as plt
+        # features_list = ['Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz']
+        # input_features = ['x', 'y', 'z']
+        # fig, axs = plt.subplots(3, 6, figsize=(18, 10))
+        # axs = axs.flatten()
+        # for i in range(3):
+        #     for j in range(6):
+        #         index = i * 6 + j
+        #         axs[index].scatter(X_train[:, i], y_train[:, j], alpha=0.3, label=f'{input_features[i]} vs {features_list[j]}')
+        #         axs[index].set_xlabel('Input Feature Value (standardized)')
+        #         axs[index].set_ylabel(f'{features_list[j]} (standardized)')
+        #         axs[index].set_title(f'Training Data: {features_list[j]} vs {input_features[i]}')
+        #         axs[index].legend()
+        # plt.tight_layout()
+        # plt.show()
 
         # PyTorch Dataset
         class DragDataset(Dataset):
@@ -393,7 +426,7 @@ class DragMLPAngular():
             - Optionally evaluates and prints test set loss after training.
         """
 
-        train_ds, val_ds, _, train_loader, val_loader, _, scaler_y = self.load_data()
+        train_ds, val_ds, _, train_loader, val_loader, _, scaler_y = self.load_data(fit_scalers=True)
         INPUT_SIZE = self.input_size 
         OUTPUT_SIZE = self.output_size 
         EPOCHS = self.epochs 
@@ -457,7 +490,11 @@ class DragMLPAngular():
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                torch.save(model, 'best_model_angular.pt')
+                os.makedirs('./temp_best_models', exist_ok=True)
+                torch.save(model, './temp_best_models/best_model_angular.pt')
+                if hasattr(self, 'scaler_X') and hasattr(self, 'scaler_y'):
+                    joblib.dump(self.scaler_X, './temp_best_models/scaler_X_angular.pkl')
+                    joblib.dump(self.scaler_y, './temp_best_models/scaler_y_angular.pkl')
                 print(f"Best angular model saved at epoch {epoch+1} with val loss {val_loss:.4f}")
 
         # 7. Plot training and validation loss
@@ -474,8 +511,10 @@ class DragMLPAngular():
         Returns:
             - float: The test set loss, and plot of predicted vs actual values
         """
-        _, _, _, _, _, test_loader, scaler_y = self.load_data()
-        model = torch.load('best_model_angular.pt')
+        model = torch.load('./temp_best_models/best_model_angular.pt')
+        self.scaler_X = joblib.load('./temp_best_models/scaler_X_angular.pkl')
+        self.scaler_y = joblib.load('./temp_best_models/scaler_y_angular.pkl')
+        _, _, _, _, _, test_loader, _ = self.load_data(fit_scalers=False)
         model.eval() 
         all_preds = []
         all_targets = []
@@ -490,8 +529,8 @@ class DragMLPAngular():
         all_targets = np.concatenate(all_targets) 
 
         # Inverse transform to original scale
-        all_preds_orig = scaler_y.inverse_transform(all_preds)
-        all_targets_orig = scaler_y.inverse_transform(all_targets)
+        all_preds_orig = self.scaler_y.inverse_transform(all_preds)
+        all_targets_orig = self.scaler_y.inverse_transform(all_targets)
 
         # Compute errors for each feature
         # shape: (num_samples, num_outputs)
@@ -518,16 +557,15 @@ def main(linear=False, train=False, test=False):
     Main entry point for the script. Sets default parameters and calls the training function.
     """
     # Parameters
-    DATA_PATH_LINEAR = ['curee_full_model/7-15LinData.csv', 'curee_full_model/7-16lindata.csv', 'curee_full_model/7-17lindata.csv', 'curee_full_model/7-22lindata.csv', 
-                        'curee_full_model/8-5lindata.csv', 'curee_full_model/8-6lindata.csv']
-    DATA_PATH_ANGULAR = ['curee_full_model/NewAngularResults.csv']  # CSV/TXT files
+    DATA_PATH_LINEAR = ['curee_full_model/7-15LinData.csv', 'curee_full_model/7-16lindata.csv', 'curee_full_model/7-17lindata.csv', 'curee_full_model/7-22lindata.csv', 'curee_full_model/8-11lindata.csv']
+    DATA_PATH_ANGULAR = ['curee_full_model/NewAngularResults.csv', 'curee_full_model/8-11angdata.csv']  # CSV/TXT files
     INPUT_SIZE = 3
     OUTPUT_SIZE = 6
-    BATCH_SIZE_LINEAR = 50
-    EPOCHS_LINEAR = 700
+    BATCH_SIZE_LINEAR = 32
+    EPOCHS_LINEAR = 400
     LEARNING_RATE_LINEAR = 2e-3
 
-    BATCH_SIZE_ANGULAR = 50
+    BATCH_SIZE_ANGULAR = 32
     EPOCHS_ANGULAR = 400
     LEARNING_RATE_ANGULAR = 2e-4
     VAL_SIZE = 0.10
@@ -554,4 +592,4 @@ def main(linear=False, train=False, test=False):
 
 
 if __name__ == "__main__":
-    main(linear=True, train=True, test=False) 
+    main(linear=True, train=True, test=True) 
