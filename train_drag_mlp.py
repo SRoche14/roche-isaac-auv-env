@@ -106,20 +106,20 @@ class DragMLPLinear():
 
         # Plot the entire training dataset by feature (6 plots, one for each output feature)
         
-        # features_list = ['Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz']
-        # input_features = ['x', 'y', 'z']
-        # fig, axs = plt.subplots(3, 6, figsize=(18, 10))
-        # axs = axs.flatten()
-        # for i in range(3):
-        #     for j in range(6):
-        #         index = i * 6 + j
-        #         axs[index].scatter(X_train[:, i], y_train[:, j], alpha=0.3, label=f'{input_features[i]} vs {features_list[j]}')
-        #         axs[index].set_xlabel('Input Feature Value (standardized)')
-        #         axs[index].set_ylabel(f'{features_list[j]} (standardized)')
-        #         axs[index].set_title(f'Training Data: {features_list[j]} vs {input_features[i]}')
-        #         axs[index].legend()
-        # plt.tight_layout()
-        # plt.show()
+        features_list = ['Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz']
+        input_features = ['x', 'y', 'z']
+        fig, axs = plt.subplots(3, 6, figsize=(18, 10))
+        axs = axs.flatten()
+        for i in range(3):
+            for j in range(6):
+                index = i * 6 + j
+                axs[index].scatter(X_train[:, i], y_train[:, j], alpha=0.3, label=f'{input_features[i]} vs {features_list[j]}')
+                axs[index].set_xlabel('Input Feature Value (standardized)')
+                axs[index].set_ylabel(f'{features_list[j]} (standardized)')
+                axs[index].set_title(f'Training Data: {features_list[j]} vs {input_features[i]}')
+                axs[index].legend()
+        plt.tight_layout()
+        plt.show()
 
         # PyTorch Dataset
         class DragDataset(Dataset):
@@ -372,21 +372,21 @@ class DragMLPAngular():
         y_test = scaler_y.transform(y_test)
 
         # Plot the entire training dataset by feature (6 plots, one for each output feature)
-        # import matplotlib.pyplot as plt
-        # features_list = ['Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz']
-        # input_features = ['x', 'y', 'z']
-        # fig, axs = plt.subplots(3, 6, figsize=(18, 10))
-        # axs = axs.flatten()
-        # for i in range(3):
-        #     for j in range(6):
-        #         index = i * 6 + j
-        #         axs[index].scatter(X_train[:, i], y_train[:, j], alpha=0.3, label=f'{input_features[i]} vs {features_list[j]}')
-        #         axs[index].set_xlabel('Input Feature Value (standardized)')
-        #         axs[index].set_ylabel(f'{features_list[j]} (standardized)')
-        #         axs[index].set_title(f'Training Data: {features_list[j]} vs {input_features[i]}')
-        #         axs[index].legend()
-        # plt.tight_layout()
-        # plt.show()
+        import matplotlib.pyplot as plt
+        features_list = ['Fx', 'Fy', 'Fz', 'Mx', 'My', 'Mz']
+        input_features = ['x', 'y', 'z']
+        fig, axs = plt.subplots(3, 6, figsize=(18, 10))
+        axs = axs.flatten()
+        for i in range(3):
+            for j in range(6):
+                index = i * 6 + j
+                axs[index].scatter(X_train[:, i], y_train[:, j], alpha=0.3, label=f'{input_features[i]} vs {features_list[j]}')
+                axs[index].set_xlabel('Input Feature Value (standardized)')
+                axs[index].set_ylabel(f'{features_list[j]} (standardized)')
+                axs[index].set_title(f'Training Data: {features_list[j]} vs {input_features[i]}')
+                axs[index].legend()
+        plt.tight_layout()
+        plt.show()
 
         # PyTorch Dataset
         class DragDataset(Dataset):
@@ -552,13 +552,16 @@ class DragMLPAngular():
         )
         fig.show()
 
-def main(linear=False, train=False, test=False):
+def main(linear=True, train=True, test=False):
     """
     Main entry point for the script. Sets default parameters and calls the training function.
     """
     # Parameters
-    DATA_PATH_LINEAR = ['curee_full_model/7-15LinData.csv', 'curee_full_model/7-16lindata.csv', 'curee_full_model/7-17lindata.csv', 'curee_full_model/7-22lindata.csv', 'curee_full_model/8-11lindata.csv']
-    DATA_PATH_ANGULAR = ['curee_full_model/NewAngularResults.csv', 'curee_full_model/8-11angdata.csv']  # CSV/TXT files
+    # DATA_PATH_LINEAR = ['curee_full_model/7-15LinData.csv', 'curee_full_model/7-16lindata.csv', 'curee_full_model/7-17lindata.csv', 'curee_full_model/7-22lindata.csv', 'curee_full_model/8-11lindata.csv']
+    # DATA_PATH_ANGULAR = ['curee_full_model/NewAngularResults.csv', 'curee_full_model/8-11angdata.csv']  # CSV/TXT files
+    # the following data has ~10k examples each. These examples come from the symmetric curee cad model
+    # DATA_PATH_LINEAR = ['symmetric_curee_data/LinearResults.csv']
+    DATA_PATH_ANGULAR = ['symmetric_curee_data/AngularResults.csv'] 
     INPUT_SIZE = 3
     OUTPUT_SIZE = 6
     BATCH_SIZE_LINEAR = 32

@@ -57,8 +57,9 @@ class WarpAUVEnvWindow(BaseEnvWindow):
 @configclass
 class WarpAUVEnvCfg(DirectRLEnvCfg):
     ui_window_class_type = WarpAUVEnvWindow
-
-    sim: SimulationCfg = SimulationCfg(dt=1 / 120)
+    # used to be 1 /120
+    dt=1 / (50 * 1)
+    sim: SimulationCfg = SimulationCfg(dt=1 / (50 * 1))
 
     # robot
     robot_cfg: RigidObjectCfg = WARPAUV_CFG.replace(prim_path="/World/envs/env_.*/Robot")
@@ -74,14 +75,14 @@ class WarpAUVEnvCfg(DirectRLEnvCfg):
 
 
     # env
-    decimation = 2
+    decimation = 1
     cap_episode_length = True
-    episode_length_s = 6.0
+    episode_length_s = 600000.0
     episode_length_before_reset = None
     num_actions = 6
     num_observations = 17
     num_states = 0
-    use_boundaries = True
+    use_boundaries = False
     max_auv_x = 7
     max_auv_y = 7
     max_auv_z = 7
@@ -111,11 +112,17 @@ class WarpAUVEnvCfg(DirectRLEnvCfg):
     com_to_cob_offset = [0.0, 0.0, 0.01] # in meters, add this (xyz) to COM to get COB location
     water_rho = 997.0 # kg/m^3
     water_beta = 0.001306 # Pa s, dynamic viscosity of water @ 50 deg F
-    rotor_constant = 0.1 / 100.0 # rotor constant used in Gazebo, note /10 because 0.04 is "10x bigger than it should be"
+    # scaling down based on force calculations. T200 thruster should be 50 N force max
+    rotor_constant = (0.1 / 100.0) * (1/5) # rotor constant used in Gazebo, note /10 because 0.04 is "10x bigger than it should be"
     dyn_time_constant = 0.05 # time constant for linear dynamics for each rotor 
-    volume = 0.022747843530591776 # assuming cubic meters - NEUTRALLY BOUYANT. In orignal sim file volume = 0.0223
+    volume = 0.02529488465 # assuming cubic meters - NEUTRALLY BOUYANT. In orignal sim file volume = 0.0223
     # volume = 0.03
-    mass = 2.2701e+01 # kg
+    # mass = 2.2701e+01 # kg
+    mass = 25.219
+    # Steady-state driver thruster scaling (Forward runs fit); set to 1.0 to disable.
+    driver_thruster_coeff_analytic = 0.35130803790983434
+    driver_thruster_coeff_cfd = 0.15822523471830657
+    driver_thruster_coeff = driver_thruster_coeff_cfd
 
      # domain randomization
     # todo: isaaclabs has a built-in method somehow
@@ -124,9 +131,12 @@ class WarpAUVEnvCfg(DirectRLEnvCfg):
         # com_to_cob_offset_radius = 0 # uniform from sphere around predicted com_to_cob_offset
         # volume_range = [0.022747843530591776, 0.022747843530591776] # uniform [lowerbound, upperbound]
         # mass_range = [2.2701e+0,2.2701e+0] # uniform [lowerbound, upperbound]
-        com_to_cob_offset_radius = 0.05 # uniform from sphere around predicted com_to_cob_offset
-        volume_range = [0.019747843530591773, 0.02574784353059178] # uniform [loierbound, upperbound]
-        mass_range = [2.2701e+01,2.2701e+01] # uniform [lowerbound, upperbound]
+        # com_to_cob_offset_radius = 0.05 # uniform from sphere around predicted com_to_cob_offset
+        com_to_cob_offset_radius = 0.00
+        # volume_range = [0.019747843530591773, 0.02574784353059178] # uniform [loierbound, upperbound]
+        volume_range = [0.02529488465,0.02529488465]
+        # mass_range = [2.2701e+01,2.2701e+01] # uniform [lowerbound, upperbound]
+        mass_range = [25.219, 25.219]
 
 
 class WarpAUVEnv(DirectRLEnv):
@@ -153,7 +163,8 @@ class WarpAUVEnv(DirectRLEnv):
         # Get thruster configurations
         self.thruster_com_offsets, self.thruster_quats = get_thruster_com_and_orientations(self.device)
         self.thruster_com_offsets = self.thruster_com_offsets.unsqueeze(0).repeat(self.num_envs, 1, 1)
-        self.thruster_quats = self.thruster_quats.repeat(self.num_envs, 1)
+        # Keep quaternions aligned per env and per thruster: shape (num_envs, 6, 4)
+        self.thruster_quats = self.thruster_quats.unsqueeze(0).repeat(self.num_envs, 1, 1)
 
         torch.manual_seed(0)
 
@@ -169,14 +180,14 @@ class WarpAUVEnv(DirectRLEnv):
         # Get specific information about the AUV
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
 
-        # todo: get inertias from the model or physx view
         self.inertia_tensors = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float, requires_grad=False)
 
         # estimated inertial values from a solid rect. prism model (with estimated side lengths of 0.7m, 0.4m, and 0.2m):
         # fake inertial values for warpauv, based on I_ii = (1/12) * mass * (len_j**2 + len_k**2)
-        self.inertia_tensors[:, 0] = 0.37
-        self.inertia_tensors[:, 1] = 0.97
-        self.inertia_tensors[:, 2] = 1.19
+        # note: updated these as of 1/8/2026
+        self.inertia_tensors[:, 0] = 0.30
+        self.inertia_tensors[:, 1] = 1.2
+        self.inertia_tensors[:, 2] = 1.07
 
         if self.cfg.mass:
             self.masses = torch.full((self.num_envs, 1), self.cfg.mass, device=self.device)
@@ -207,7 +218,7 @@ class WarpAUVEnv(DirectRLEnv):
           self.cfg.com_to_cob_offset = torch.tensor(self.cfg.com_to_cob_offset, device=self.device, dtype=torch.float32, requires_grad=False).reshape(1,3).repeat(self.num_envs, 1)
 
         # get force calculation functions and rotor dynamics models
-        self.force_calculation_functions = HydrodynamicForceModels(self.num_envs, self.device, False)
+        self.force_calculation_functions = HydrodynamicForceModels(self.num_envs, self.device, debug=False, use_transient_models=True)
         self.thruster_dynamics = DynamicsFirstOrder(self.num_envs, 6, self.cfg.dyn_time_constant, self.device)
         self.thruster_conversion = ConversionFunctionBasic(self.cfg.rotor_constant)
 
@@ -293,7 +304,7 @@ class WarpAUVEnv(DirectRLEnv):
         if self.cfg.episode_length_before_reset:
             if self._step_count == self.cfg.episode_length_before_reset:
                 time_out = torch.ones(self.num_envs)
-
+        self.cfg.use_boundaries == False
         if self.cfg.use_boundaries:
             out_of_bounds = (
                 (torch.abs(self._robot.data.root_pos_w[:, 0] - self.scene.env_origins[:, 0]) > self.cfg.max_auv_x) | 
@@ -302,7 +313,9 @@ class WarpAUVEnv(DirectRLEnv):
             )
         else:
             out_of_bounds = torch.zeros(self.num_envs)
-
+        # removing out of bounds and timeout for now
+        out_of_bounds = torch.zeros(self.num_envs)
+        time_out = torch.zeros(self.num_envs)
         return out_of_bounds, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
@@ -409,14 +422,20 @@ class WarpAUVEnv(DirectRLEnv):
         # convert the PWM commands to rad/s using method in https://gitlab.com/warplab/ros/warpauv/warpauv_simulation/-/blob/master/src/robot_sim_interface.py
         
         #Artificially include thruster imbalance coefficients for thruster 1 and 2
-        b_bias = 0.50
+        b_bias = 0.5
+        f_bias = 1.0
         
         # Zero small values
         motorValues[torch.abs(motorValues) < 0.08] = 0
+        # motorValues *= 0.5
 
         # Forward bias to all thrusters
         mask_fwd = motorValues >= 0.08
-        motorValues[mask_fwd] = -139.0 * torch.pow(motorValues[mask_fwd], 2.0) + 500 * motorValues[mask_fwd] + 8.28
+        motorValues[mask_fwd] = 0.8 * (-139.0 * torch.pow(motorValues[mask_fwd], 2.0) + 500 * motorValues[mask_fwd] + 8.28)
+
+        # damp forward bias on thruster 1 and 2
+        mask_fwd_12 = motorValues[:, 0:2] > 0.08
+        motorValues[:, 0:2][mask_fwd_12] *= f_bias
 
         #Extra Backward bias on thruster2 1 and 2
         mask_back_12 = motorValues[:, 0:2] <= -0.08
@@ -426,20 +445,26 @@ class WarpAUVEnv(DirectRLEnv):
         mask_back_36 = motorValues[:, 2:6] <= -0.08
         motorValues[:, 2:6][mask_back_36] = ( 161.0 * torch.pow(motorValues[:, 2:6][mask_back_36], 2.0) + 517.86 * motorValues[:, 2:6][mask_back_36] - 5.72)
 
+        motorValues *= 1.0
 
         # get the current motor velocities using thruster dynamics
-        # TODO: CHECK THAT SIM DT IS CORRECT HERE
+
         motorValues = self.thruster_dynamics.update(motorValues, self.episode_length_buf * self.sim.cfg.dt)
 
         # get thruster forces from their speeds using the thruster conversion function 
         motorValues = self.thruster_conversion.convert(motorValues)
+        # Apply steady-state scaling to driver thrusters (0: drive_left, 1: drive_right).
+        if self.cfg.driver_thruster_coeff != 1.0:
+            motorValues[:, 0:2] *= self.cfg.driver_thruster_coeff
 
         # TODO: this could be taken out of the physics step
-        thruster_forces[..., 0] = 1.0 # start with forces in the x direction
+        thruster_forces[..., 0] = 1.0 # start with forces in the thruster x direction
         thruster_forces = quat_apply(self.thruster_quats, thruster_forces) # rotate the forces into the thruster's frame
+     
 
         # apply the force magnitudes to the thruster forces
         thruster_forces = thruster_forces * motorValues.unsqueeze(-1) # make motorValues shape (num_envs, 6, 1))
+
 
         # calculate the thruster torques 
         # T = r x F
@@ -448,6 +473,7 @@ class WarpAUVEnv(DirectRLEnv):
         # F (num_envs, num_thrusters_per_env, 3)
         # it should broadcast r to be (num_envs, num_thrusters_per_env, 3)
         thruster_torques = torch.cross(self.thruster_com_offsets, thruster_forces, dim=-1)
+
 
         # now sum together all the forces/torques on each robot
         thruster_forces = torch.sum(thruster_forces, dim=-2) # sum over the thruster indices
