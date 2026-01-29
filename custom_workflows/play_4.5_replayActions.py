@@ -29,6 +29,7 @@ import gymnasium as gym
 import os
 import torch
 import csv
+import json
 
 from rsl_rl.runners import OnPolicyRunner
 
@@ -38,6 +39,7 @@ import math
 import rosbag
 
 import isaaclab_tasks  # noqa: F401
+from isaaclab.utils.math import quat_apply, quat_conjugate
 from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
 from isaaclab_rl.rsl_rl import (
     RslRlOnPolicyRunnerCfg,
@@ -48,13 +50,22 @@ from isaaclab_rl.rsl_rl import (
 # ---- user-editable inputs ----
 # ACTIONS_BAG = "/home/warp/isaacsim4.5/IsaacLab/roche-isaac-auv-env/SimpleDragBag/Left/Left3_2025-11-19-15-45-44_pwm_command_list.bag"
 # ACTIONS_BAG = "/home/warp/isaacsim4.5/IsaacLab/roche-isaac-auv-env/SimpleDragBag/Forward/Forward1_pwm_command_list_filtered_pwm_command_list.bag"
-ACTIONS_BAG = "/home/warp/isaacsim4.5/IsaacLab/roche-isaac-auv-env/MITRE/Circles/mitreCircle2_2025-12-16-15-17-59.bag"
+ACTIONS_BAG = "/home/warp/isaacsim4.5/IsaacLab/roche-isaac-auv-env/MITRE/Left/mitreLeft1_2025-12-16-14-09-31.bag"
 
 ACTIONS_TOPIC = "/warpauv_1/control/motor_controller_feather/pwm_command_list"
 # Match env ordering (thruster_dynamics.py): drive_left, drive_right, rear_left, rear_right, front_left, front_right
 ACTION_ORDER = ["drive_left", "drive_right", "rear_left", "rear_right", "front_left", "front_right"]
 ACTION_FIELD = "position"  # field within each motor command message
 
+# Drag model selection: "mujoco_box", "steady_cfd", or "transient_cfd"
+DRAG_MODEL = "cuboid"
+DRAG_MODEL_LABELS = {
+    "cuboid": "Cuboid",
+    "steady_cfd": "CFD",
+    "transient_cfd": "TransientCFD",
+}
+
+bag_number = 1
 
 def pwm_to_action(x: np.ndarray) -> np.ndarray:
     """
@@ -146,6 +157,42 @@ def compute_time_weighted_means(rel_times: np.ndarray, actions_np: np.ndarray, s
     return means
 
 
+def _calculate_equivalent_box_dims(inertias: torch.Tensor, masses: torch.Tensor) -> torch.Tensor:
+    # ri = sqrt((3/(2m)) * (I_j + I_k - I_i))
+    return torch.sqrt(
+        (3.0 / (2.0 * masses.repeat(1, 3)))
+        * (torch.roll(inertias, 1, 1) + torch.roll(inertias, -1, 1) - inertias)
+    )
+
+
+def mujoco_box_drag_forces(
+    root_quat_w: torch.Tensor,
+    root_linvel_w: torch.Tensor,
+    root_angvel_w: torch.Tensor,
+    inertias: torch.Tensor,
+    masses: torch.Tensor,
+    water_rho: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    root_quats_b = quat_conjugate(root_quat_w)
+    root_linvels_b = quat_apply(root_quats_b, root_linvel_w)
+    root_angvels_b = quat_apply(root_quats_b, root_angvel_w)
+
+    ri = _calculate_equivalent_box_dims(inertias, masses)
+    rj = torch.roll(ri, 1, 1)
+    rk = torch.roll(ri, -1, 1)
+
+    forces = -2.0 * water_rho * rj * rk * torch.abs(root_linvels_b) * root_linvels_b
+    torques = (
+        -0.5
+        * water_rho
+        * ri
+        * (torch.pow(rj, 4) + torch.pow(rk, 4))
+        * torch.abs(root_angvels_b)
+        * root_angvels_b
+    )
+    return forces, torques
+
+
 def main():
     """Play / replay using recorded PWM actions."""
 
@@ -217,15 +264,28 @@ def main():
     # Preload transformer models/scalers if enabled to avoid first-step stall.
     base_env = env.unwrapped
     force_models = getattr(base_env, "force_calculation_functions", None)
-    if force_models is not None and getattr(force_models, "use_transient_models", False):
-        print("[INFO] Preloading transient CFD transformer models...")
-        force_models.debug = False
-        force_models._ensure_transient_models_loaded()
+
+    if DRAG_MODEL not in DRAG_MODEL_LABELS:
+        raise ValueError(f"Invalid DRAG_MODEL '{DRAG_MODEL}'.")
+    drag_label = DRAG_MODEL_LABELS[DRAG_MODEL]
+
+    if force_models is not None:
+        if DRAG_MODEL == "transient_cfd":
+            force_models.use_transient_models = True
+            print("[INFO] Preloading transient CFD transformer models...")
+            force_models.debug = False
+            force_models._ensure_transient_models_loaded()
+        elif DRAG_MODEL == "steady_cfd":
+            force_models.use_transient_models = False
+        elif DRAG_MODEL == "mujoco_box":
+            force_models.use_transient_models = False
+
     print("[INFO] Getting initial observations...")
     obs, _ = env.get_observations()
     device = env.unwrapped.device
 
     positions = []
+    drag_log = []
 
     # Get your robot/vehicle articulation
     vehicle = getattr(base_env, "_robot")
@@ -234,6 +294,7 @@ def main():
         raise RuntimeError("Could not find vehicle articulation in the environment.")
 
     print("[INFO] Starting simulation replay...")
+    warned_no_drag = False
     for k in range(len(actions_seq)):
         if not simulation_app.is_running():
             break
@@ -253,21 +314,110 @@ def main():
             obs, rews, _, _ = env.step(action_tensor)
             root_state = vehicle.data.root_state_w   # tensor shape (num_robots, 13)
             pos = root_state[0, 0:3].detach().cpu().numpy().tolist()
+            lin_vel_b = quat_apply(
+                quat_conjugate(vehicle.data.root_quat_w),
+                vehicle.data.root_lin_vel_w,
+            )[0].detach().cpu().numpy().tolist()
+            ang_vel_b = quat_apply(
+                quat_conjugate(vehicle.data.root_quat_w),
+                vehicle.data.root_ang_vel_w,
+            )[0].detach().cpu().numpy().tolist()
 
             positions.append(pos)
             # simple logging as in your script
             distance = torch.norm(obs[0])  # FYI: this is the norm of the full obs vector
             w.writerow([rews[0].cpu().item(), distance.cpu().item()])
 
+            if DRAG_MODEL == "mujoco_box":
+                drag_f, drag_tau = mujoco_box_drag_forces(
+                    vehicle.data.root_quat_w,
+                    vehicle.data.root_lin_vel_w,
+                    vehicle.data.root_ang_vel_w,
+                    base_env.inertia_tensors,
+                    base_env.masses,
+                    base_env.cfg.water_rho,
+                )
+                drag_force = drag_f[0].detach().cpu().numpy().tolist()
+                drag_torque = drag_tau[0].detach().cpu().numpy().tolist()
+                drag_log.append(
+                    {
+                        "t": float(k * sim_dt),
+                        "drag_force_b": drag_force,
+                        "drag_torque_b": drag_torque,
+                        "lin_vel_b": lin_vel_b,
+                        "ang_vel_b": ang_vel_b,
+                    }
+                )
+            elif force_models is not None:
+                if hasattr(force_models, "predict_drag_components"):
+                    f_lin, t_lin, f_ang, t_ang, _, _ = force_models.predict_drag_components(
+                        vehicle.data.root_quat_w,
+                        vehicle.data.root_lin_vel_w,
+                        vehicle.data.root_ang_vel_w,
+                    )
+                    drag_force = (f_lin + f_ang)[0].detach().cpu().numpy().tolist()
+                    drag_torque = (t_lin + t_ang)[0].detach().cpu().numpy().tolist()
+                    drag_log.append(
+                        {
+                            "t": float(k * sim_dt),
+                            "drag_force_b": drag_force,
+                            "drag_torque_b": drag_torque,
+                            "drag_force_linear_b": f_lin[0].detach().cpu().numpy().tolist(),
+                            "drag_torque_linear_b": t_lin[0].detach().cpu().numpy().tolist(),
+                            "drag_force_angular_b": f_ang[0].detach().cpu().numpy().tolist(),
+                            "drag_torque_angular_b": t_ang[0].detach().cpu().numpy().tolist(),
+                            "lin_vel_b": lin_vel_b,
+                            "ang_vel_b": ang_vel_b,
+                        }
+                    )
+                else:
+                    f_d, g_d, f_v, g_v = force_models.calculate_density_and_viscosity_forces(
+                        vehicle.data.root_quat_w,
+                        vehicle.data.root_lin_vel_w,
+                        vehicle.data.root_ang_vel_w,
+                        base_env.inertia_tensors,
+                        base_env.inertia_tensors_mean,
+                        base_env.cfg.water_beta,
+                        base_env.cfg.water_rho,
+                        base_env.masses,
+                    )
+                    drag_force = (f_d + f_v)[0].detach().cpu().numpy().tolist()
+                    drag_torque = (g_d + g_v)[0].detach().cpu().numpy().tolist()
+                    drag_log.append(
+                        {
+                            "t": float(k * sim_dt),
+                            "drag_force_b": drag_force,
+                            "drag_torque_b": drag_torque,
+                            "lin_vel_b": lin_vel_b,
+                            "ang_vel_b": ang_vel_b,
+                        }
+                    )
+            elif not warned_no_drag:
+                print("[WARN] Drag model not available; skipping drag logging.")
+                warned_no_drag = True
+
     # close the simulator
     env.close()
 
-    positions_path = os.path.join(save_path, "positionsMITRECircleTransientCFD2.csv")
+    folder_name = os.path.basename(os.path.dirname(ACTIONS_BAG))
+    positions_path = os.path.join(save_path, f"positionsMITRE{folder_name}{drag_label}{bag_number}.csv")
     with open(positions_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["x", "y", "z"])
         writer.writerows(positions)
     print(f"[INFO] Saved all positions to {positions_path}")
+
+    drag_path = os.path.join(save_path, f"drag_forces_moments_{drag_label}{bag_number}.json")
+    with open(drag_path, "w") as f:
+        json.dump(
+            {
+                "drag_model": DRAG_MODEL,
+                "records": drag_log,
+            },
+            f,
+            indent=2,
+        )
+    print(f"[INFO] Saved drag forces/torques to {drag_path}")
 
 if __name__ == "__main__":
     main()

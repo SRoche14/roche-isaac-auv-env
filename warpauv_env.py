@@ -120,9 +120,16 @@ class WarpAUVEnvCfg(DirectRLEnvCfg):
     # mass = 2.2701e+01 # kg
     mass = 25.219
     # Steady-state driver thruster scaling (Forward runs fit); set to 1.0 to disable.
-    driver_thruster_coeff_analytic = 0.35130803790983434
-    driver_thruster_coeff_cfd = 0.15822523471830657
-    driver_thruster_coeff = driver_thruster_coeff_cfd
+    # Prior fit values (kept for quick rollback):
+    # driver_thruster_coeff_analytic = 0.35130803790983434
+    # driver_thruster_coeff_cfd = 0.15822523471830657
+    driver_thruster_coeff_analytic = 1.628  # cuboid fit
+    driver_thruster_coeff_cfd = 1.364
+    driver_thruster_coeff_off = 1.0
+
+    # edit this line to switch between CFD and analytic thruster coeffs
+    driver_thruster_coeff = driver_thruster_coeff_off
+    # driver_thruster_coeff = driver_thruster_coeff_analytic
 
      # domain randomization
     # todo: isaaclabs has a built-in method somehow

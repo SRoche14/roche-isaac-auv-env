@@ -2,6 +2,9 @@ import argparse
 
 from isaaclab.app import AppLauncher
 
+import cv2
+import numpy as np
+
 # local imports
 import cli_args  # isort: skip
 
@@ -47,7 +50,7 @@ def main():
     """Play with RSL-RL agent."""
     # parse configuration
     env_cfg = parse_env_cfg(
-        args_cli.task, use_gpu=not args_cli.cpu, num_envs=1, use_fabric=not args_cli.disable_fabric
+        args_cli.task, num_envs=1, use_fabric=not args_cli.disable_fabric
     )
     agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
 
@@ -56,26 +59,16 @@ def main():
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env)
 
-    # specify directory for logging experiments
-    log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
-    log_root_path = os.path.abspath(log_root_path)
-    print(f"[INFO] Loading experiment from directory: {log_root_path}")
-    resume_path = get_checkpoint_path(log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint)
+    print("TEST: ", args_cli.play_checkpoint)
+    ## TODO: adjust the following to be dynamic as in rsl_rl/train.py
+    #resume_path = args_cli.play_checkpoint
+    resume_path = '/home/warp/isaacsim4.5/IsaacLab/logs/rsl_rl/warpauv_direct/2025-08-12_10-25-18/model_3350.pt'
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
 
     # load previously trained model
     ppo_runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    print(dir(ppo_runner))
     ppo_runner.load(resume_path)
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-
-    save_path = os.path.join("source", "results", "rsl_rl", agent_cfg.experiment_name, agent_cfg.load_run, agent_cfg.load_checkpoint[:-3] + "_play")
-
-    if not os.path.exists(save_path):
-        os.makedirs(save_path)
-    
-    w = csv.writer(open(os.path.join(save_path, "output.csv"), 'w'), delimiter=',')
-    print(f"[INFO]: Saving results into: {save_path}")
 
     # obtain the trained policy for inference
     policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
@@ -83,28 +76,57 @@ def main():
     # export policy to onnx
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
     export_policy_as_jit(
-        ppo_runner.alg.actor_critic, ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.pt"
-    )
-    export_policy_as_onnx(ppo_runner.alg.actor_critic, path=export_model_dir, filename="policy.onnx")
+        ppo_runner.alg.policy, ppo_runner.obs_normalizer, path=export_model_dir, filename="policy.pt"
+    )   
+    export_policy_as_onnx(ppo_runner.alg.policy, path=export_model_dir, filename="policy.onnx")
+
+
+    des_cmd = torch.tensor([0,0,0,0,0,0])
+
+    cv2.imshow("control here", np.zeros((100,100,3)))
 
     # reset environment
     obs, _ = env.get_observations()
     # simulate environment
     while simulation_app.is_running():
+        k = cv2.waitKey(1)
+
+        if k == ord("w"):
+            des_cmd = torch.tensor([1,0,0,0,0,0])
+        elif k == ord("s"):
+            des_cmd = torch.tensor([-1,0,0,0,0,0])
+        elif k == ord("a"):
+            des_cmd = torch.tensor([0,1,0,0,0,0])
+        elif k == ord("d"):
+            des_cmd = torch.tensor([0,-1,0,0,0,0])
+        elif k == ord("q"):
+            des_cmd = torch.tensor([0,0,0,0,0,1])
+        elif k == ord("e"):
+            des_cmd = torch.tensor([0,0,0,0,0,-1])
+        elif k == ord("o"):
+            des_cmd = torch.tensor([0,0,1,0,0,0])
+        elif k == ord("l"):
+            des_cmd = torch.tensor([0,0,-1,0,0,0])
+        elif k == ord("u"):
+            des_cmd = torch.tensor([0,0,0,-1,0,0])
+        elif k == ord("j"):
+            des_cmd = torch.tensor([0,0,0,1,0,0])
+        elif k == ord("i"):
+            des_cmd = torch.tensor([0,0,0,0,-1,0])
+        elif k == ord("k"):
+            des_cmd = torch.tensor([0,0,0,0,1,0])
+        else:
+            des_cmd = torch.tensor([0,0,0,0,0,0])
+
+        print(des_cmd)
         # run everything in inference mode
         with torch.inference_mode():
             # agent stepping
+            print("Observation: ", obs)
             actions = policy(obs)
             # env stepping
             obs, rews, _, _ = env.step(actions)
-
-            obs = obs[0]
-            rews = rews[0]
-            
-
-            distance = torch.norm(obs)
-
-        w.writerow([rews.cpu().item(), distance.cpu().item()])
+            obs[:, :6] = des_cmd
 
     # close the simulator
     env.close()

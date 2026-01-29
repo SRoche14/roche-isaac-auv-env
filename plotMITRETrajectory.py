@@ -40,6 +40,7 @@ import numpy as np
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
 BASE_DIR = Path("MITRE/Forward")
+CALIBRATED_DIR = BASE_DIR / "Calibrated"
 START_TIMES_JSON = BASE_DIR / "startingForwardTimes.json"
 ALIGN_DISTANCE_M = 1.5
 ALIGN_AXIS_MODE = "xy"
@@ -793,18 +794,25 @@ def plot_one(title: str, truth: np.ndarray):
 # ----------------------------
 # File selection
 # ----------------------------
-def pick_path(base: str, run_id: int, ext: str) -> Path:
+def pick_path(base: str, run_id: int, ext: str, base_dir: Path) -> Path:
     """Choose numbered file if present, else fallback to unnumbered."""
-    numbered = BASE_DIR / f"{base}{run_id}{ext}"
+    numbered = base_dir / f"{base}{run_id}{ext}"
     if numbered.exists():
         return numbered
-    fallback = BASE_DIR / f"{base}{ext}"
+    fallback = base_dir / f"{base}{ext}"
     if fallback.exists():
         return fallback
     raise FileNotFoundError(f"Neither {numbered} nor {fallback} found")
 
 
-def load_and_align_run(run_id: int, qualy_starts=None, mitre_starts=None) -> Dict[str, np.ndarray]:
+def load_and_align_run(
+    run_id: int,
+    qualy_starts=None,
+    mitre_starts=None,
+    base_dir: Path = BASE_DIR,
+    odom_dir: Optional[Path] = None,
+    gt_dir: Optional[Path] = None,
+) -> Dict[str, np.ndarray]:
     """Load data for a run, trim by overlapping time window, and produce aligned trajectories."""
     if qualy_starts is None:
         qualy_starts = load_start_times(prefix="qualyForward")
@@ -813,10 +821,12 @@ def load_and_align_run(run_id: int, qualy_starts=None, mitre_starts=None) -> Dic
     start_gt = qualy_starts.get(run_id, 0.0)
     start_model = mitre_starts.get(run_id, 0.0)
 
-    gt_path = BASE_DIR / f"Curee Test000{run_id}.json"
-    odom_path = pick_path("odomMITREForward", run_id, ".csv")
-    cfd_path = pick_path("positionsMITREForwardCFD", run_id, ".csv")
-    cuboid_path = pick_path("positionsMITREForwardCuboid", run_id, ".csv")
+    gt_base = gt_dir if gt_dir is not None else base_dir
+    gt_path = gt_base / f"Curee Test000{run_id}.json"
+    odom_base = odom_dir if odom_dir is not None else base_dir
+    odom_path = pick_path("odomMITREForward", run_id, ".csv", odom_base)
+    cfd_path = pick_path("positionsMITREForwardCFD", run_id, ".csv", base_dir)
+    cuboid_path = pick_path("positionsMITREForwardCuboid", run_id, ".csv", base_dir)
 
     truth_full = load_ground_truth(gt_path)
     odom_full = load_xyz_csv(odom_path)
@@ -879,12 +889,25 @@ def load_and_align_run(run_id: int, qualy_starts=None, mitre_starts=None) -> Dic
 def main():
     parser = argparse.ArgumentParser(description="Plot MITRE trajectories with Umeyama alignment.")
     parser.add_argument("--run-id", type=int, default=1, help="Episode number (matches file suffixes)")
+    parser.add_argument(
+        "--calibrated",
+        action="store_true",
+        help="Use calibrated files from MITRE/Forward/Calibrated",
+    )
     args = parser.parse_args()
     run_id = args.run_id
+    base_dir = CALIBRATED_DIR if args.calibrated else BASE_DIR
     qualy_starts = load_start_times(prefix="qualyForward")
     mitre_starts = load_start_times(prefix="mitreForward")
 
-    run_data = load_and_align_run(run_id, qualy_starts, mitre_starts)
+    run_data = load_and_align_run(
+        run_id,
+        qualy_starts,
+        mitre_starts,
+        base_dir=base_dir,
+        odom_dir=BASE_DIR,
+        gt_dir=BASE_DIR,
+    )
     truth_full = run_data["truth_full"]
     truth = run_data["truth"]
     truth_smooth = run_data["truth_smooth"]
@@ -958,7 +981,14 @@ def main():
     for rid in range(1, 6):
         if rid == run_id:
             continue
-        rd = load_and_align_run(rid, qualy_starts, mitre_starts)
+        rd = load_and_align_run(
+            rid,
+            qualy_starts,
+            mitre_starts,
+            base_dir=base_dir,
+            odom_dir=BASE_DIR,
+            gt_dir=BASE_DIR,
+        )
         all_raw_stats[rid] = {
             "CFD": compute_metrics_after_meter(rd["truth"], rd["cfd_aligned"], ALIGN_AXIS_MODE, 100.0, 50.0),
             "Cuboid": compute_metrics_after_meter(rd["truth"], rd["cuboid_aligned"], ALIGN_AXIS_MODE, 100.0, 50.0),

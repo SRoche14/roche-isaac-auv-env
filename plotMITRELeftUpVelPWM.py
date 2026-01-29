@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Plot MITRE Forward body-frame velocity alongside thruster motor rad/s per test.
+Plot MITRE Left/Up body-frame velocity alongside left thruster motor rad/s per test.
 
-For each Curee Test JSON in MITRE/Forward, generate a 1x2 subplot figure.
+For each Curee Test JSON in MITRE/Left or MITRE/Up, generate a 1x2 subplot figure.
 Each subplot overlays x/y/z body-frame velocity, overall speed magnitude, and one thruster's motor rad/s.
-Highlights are the rising portion of the vxb spike that follows each PWM event.
+Highlights are the constant-velocity windows that follow each PWM event.
 Also generates a trajectory plot with body-frame velocity vectors over highlighted spans.
-Adds drag-only plots showing cuboid and CFD drag over the full log time span.
 """
 
 import argparse
@@ -27,9 +26,18 @@ try:
 except Exception:
     HAS_MPL_3D = False
 
-BASE_DIR = Path("MITRE/Forward")
-START_TIMES_JSON = BASE_DIR / "startingForwardTimes.json"
-BAG_PREFIX = "mitreForward"
+LEFT_DIR = Path("MITRE/Left")
+UP_DIR = Path("MITRE/Up")
+BASE_DIR = UP_DIR
+START_TIMES_JSON = UP_DIR / "startingUpTimes.json"
+BAG_PREFIX = "mitreUp"
+QUALY_PREFIX = "qualyUp"
+MITRE_PREFIX = "mitreUp"
+MODE_LABEL = "Up"
+
+# Match exclusions used by plotMITRETrajectoryLeft/Up.
+LEFT_EXCLUDED_TEST_IDS = {7}
+UP_EXCLUDED_TEST_IDS = {7, 12}
 
 PREFERRED_MARKER = "CUREE - 1"
 FALLBACK_MARKER_PREFIX = "CUREE"
@@ -59,10 +67,10 @@ THRUSTER_ORDER = (
     "rear_left",
 )
 
-PLOT_THRUSTERS = ("drive_left", "drive_right")
+PLOT_THRUSTERS = ("rear_left", "front_left")
 
 DEFAULT_MIN_SPEED = 0.03
-DEFAULT_MAX_SPEED_SLOPE = 0.015
+DEFAULT_MAX_SPEED_SLOPE = 0.080
 DEFAULT_MIN_SEGMENT_SEC = 0.1
 DEFAULT_MIN_VEL_SPIKE_SEC = 0.15
 DEFAULT_MIN_AVG_ACCEL = 0.05
@@ -84,8 +92,8 @@ DEFAULT_DRAG_LOG_CUBOID_PREFIX = "drag_forces_moments_Cuboid"
 DEFAULT_DRAG_LOG_CFD_PREFIX = "drag_forces_moments_CFD"
 
 VECTOR_COLORS = {
-    "drive_left": "tab:purple",
-    "drive_right": "tab:brown",
+    "rear_left": "tab:purple",
+    "front_left": "tab:brown",
 }
 
 DEFAULT_DIR_EPS = 1e-6
@@ -423,6 +431,24 @@ def overall_direction(positions: np.ndarray) -> np.ndarray:
     return _normalize_vector(vec)
 
 
+def primary_direction_for_mode(mode_label: str) -> np.ndarray:
+    if mode_label.lower() == "left":
+        return np.array([0.0, 1.0, 0.0], dtype=float)
+    if mode_label.lower() == "up":
+        return np.array([0.0, 0.0, 1.0], dtype=float)
+    return np.array([1.0, 0.0, 0.0], dtype=float)
+
+
+def primary_velocity_component(vel_b: np.ndarray, mode_label: str) -> np.ndarray:
+    if vel_b.size == 0:
+        return vel_b
+    if mode_label.lower() == "left":
+        return vel_b[:, 1]
+    if mode_label.lower() == "up":
+        return vel_b[:, 2]
+    return vel_b[:, 0]
+
+
 def quat_conjugate_np(q: np.ndarray) -> np.ndarray:
     q = np.asarray(q, dtype=float)
     return np.array([q[0], -q[1], -q[2], -q[3]], dtype=float)
@@ -454,6 +480,38 @@ def quat_from_two_vectors(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     if norm < DEFAULT_DIR_EPS:
         return np.array([1.0, 0.0, 0.0, 0.0], dtype=float)
     return q / norm
+
+
+THRUSTER_RPY = {
+    "rear_left": (0.0, -0.785398, 1.5708),
+    "rear_right": (0.0, -0.785398, -1.5708),
+    "front_left": (0.0, 0.785398, 1.5708),
+    "front_right": (0.0, 0.785398, -1.5708),
+    "drive_left": (0.0, 0.0, 0.0),
+    "drive_right": (0.0, 0.0, 0.0),
+}
+
+
+def rot_from_rpy(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    """Rotation matrix for XYZ (roll, pitch, yaw)."""
+    cr = np.cos(roll)
+    sr = np.sin(roll)
+    cp = np.cos(pitch)
+    sp = np.sin(pitch)
+    cy = np.cos(yaw)
+    sy = np.sin(yaw)
+    rx = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]], dtype=float)
+    ry = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]], dtype=float)
+    rz = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]], dtype=float)
+    return rz @ ry @ rx
+
+
+def thruster_axes_body() -> Dict[str, np.ndarray]:
+    axes: Dict[str, np.ndarray] = {}
+    for name, (roll, pitch, yaw) in THRUSTER_RPY.items():
+        axis = rot_from_rpy(roll, pitch, yaw).T @ np.array([1.0, 0.0, 0.0], dtype=float)
+        axes[name] = axis
+    return axes
 
 
 def rotate_world_to_body(vectors_w: np.ndarray, q_wb: np.ndarray) -> np.ndarray:
@@ -580,60 +638,116 @@ def compute_pwm_signals(
 
 def compute_highlight_segments(
     t_vel: np.ndarray,
-    vx_raw: np.ndarray,
+    primary_vel: np.ndarray,
     driver_signal: Optional[np.ndarray],
     min_motor: float,
     max_motor_slope: float,
     min_duration: float,
     min_speed: float,
+    max_speed_slope: float,
 ) -> Tuple[
     List[Tuple[float, float]],
     List[Tuple[float, float]],
     List[Tuple[float, float]],
     List[Tuple[float, float, float, float]],
+    List[Tuple[float, float]],
+    List[Tuple[float, float]],
+    List[Tuple[float, float]],
 ]:
     highlight_segments_all: List[Tuple[float, float]] = []
     fit_lines: List[Tuple[float, float, float, float]] = []
     pwm_events_plot: List[Tuple[float, float]] = []
     pwm_positive_plot: List[Tuple[float, float]] = []
+    yellow_segments: List[Tuple[float, float]] = []
+    accel_pos_segments: List[Tuple[float, float]] = []
+    accel_neg_segments: List[Tuple[float, float]] = []
     if driver_signal is None:
-        return pwm_events_plot, pwm_positive_plot, highlight_segments_all, fit_lines
+        return (
+            pwm_events_plot,
+            pwm_positive_plot,
+            highlight_segments_all,
+            fit_lines,
+            yellow_segments,
+            accel_pos_segments,
+            accel_neg_segments,
+        )
     if len(t_vel) < 3:
-        return pwm_events_plot, pwm_positive_plot, highlight_segments_all, fit_lines
-
-    pwm_events = find_pwm_events(
+        return (
+            pwm_events_plot,
+            pwm_positive_plot,
+            highlight_segments_all,
+            fit_lines,
+            yellow_segments,
+            accel_pos_segments,
+            accel_neg_segments,
+        )
+    # Blue windows: non-zero, constant PWM segments.
+    pwm_const_mask = constant_mask(
         t_vel,
         driver_signal,
         min_value=min_motor,
         max_slope=max_motor_slope,
-        min_duration=min_duration,
+        use_abs=True,
     )
-    if pwm_events:
-        pos_mask = driver_signal >= min_motor
-        event_mask = np.zeros_like(pos_mask, dtype=bool)
-        for seg_start, seg_end in pwm_events:
-            event_mask |= (t_vel >= seg_start) & (t_vel <= seg_end)
-        pos_event_mask = pos_mask & event_mask
-        pwm_positive_plot = segments_from_mask(t_vel, pos_event_mask, min_duration=min_duration)
-    for idx_event, (seg_start, seg_end) in enumerate(pwm_events):
-        next_start = pwm_events[idx_event + 1][0] if idx_event + 1 < len(pwm_events) else t_vel[-1]
-        positive_seg = find_overlapping_segment((seg_start, seg_end), pwm_positive_plot)
-        rise_start = positive_seg[0] if positive_seg is not None else seg_start
-        fit = select_linear_rise_segment(
-            t_vel,
-            vx_raw,
-            seg_start=rise_start,
-            end_t=next_start,
-            min_duration=min_duration,
-            min_speed=min_speed,
-            pwm_events=pwm_events,
-            event_idx=idx_event,
-        )
-        if fit is None:
-            continue
-        slope, rise_start, rise_end, intercept, fit_start, fit_end = fit
-        highlight_segments_all.append((rise_start, rise_end))
-        fit_lines.append((slope, fit_start, fit_end, intercept))
+    pwm_events = segments_from_mask(t_vel, pwm_const_mask, min_duration=min_duration)
+    pwm_events_plot = clip_segments(pwm_events, DEFAULT_HIGHLIGHT_MIN_START)
+    pwm_positive_plot = pwm_events_plot.copy()
+
+    # Yellow windows: non-zero, near-constant primary velocity segments.
+    vel_const_mask = constant_mask(
+        t_vel,
+        primary_vel,
+        min_value=min_speed,
+        max_slope=max_speed_slope,
+        use_abs=False,
+    )
+    vel_const_mask &= primary_vel >= min_speed
+    vel_segments = segments_from_mask(t_vel, vel_const_mask, min_duration=min_duration)
+
+    for seg_start, seg_end in vel_segments:
+        for blue_start, blue_end in pwm_events:
+            if not _segments_overlap((seg_start, seg_end), (blue_start, blue_end)):
+                continue
+            clip_start = max(seg_start, blue_start)
+            clip_end = min(seg_end, blue_end)
+            if (clip_end - clip_start) < min_duration:
+                continue
+            yellow_segments.append((clip_start, clip_end))
+            highlight_segments_all.append((clip_start, clip_end))
+            fit = linear_fit_segment(t_vel, primary_vel, clip_start, clip_end)
+            if fit is not None:
+                slope, intercept = fit
+                fit_lines.append((slope, clip_start, clip_end, intercept))
+
+    accel = np.gradient(primary_vel, t_vel)
+    accel_const_mask = constant_mask(
+        t_vel,
+        accel,
+        min_value=DEFAULT_MIN_AVG_ACCEL,
+        max_slope=max_speed_slope,
+        use_abs=True,
+    )
+    accel_segments = segments_from_mask(t_vel, accel_const_mask, min_duration=min_duration)
+    for seg_start, seg_end in accel_segments:
+        for blue_start, blue_end in pwm_events:
+            if not _segments_overlap((seg_start, seg_end), (blue_start, blue_end)):
+                continue
+            clip_start = max(seg_start, blue_start)
+            clip_end = min(seg_end, blue_end)
+            if (clip_end - clip_start) < min_duration:
+                continue
+            fit = linear_fit_segment(t_vel, primary_vel, clip_start, clip_end)
+            if fit is None:
+                continue
+            slope, intercept = fit
+            if slope > 0.0:
+                accel_pos_segments.append((clip_start, clip_end))
+            elif slope < 0.0:
+                accel_neg_segments.append((clip_start, clip_end))
+            else:
+                continue
+            highlight_segments_all.append((clip_start, clip_end))
+            fit_lines.append((slope, clip_start, clip_end, intercept))
 
     highlight_segments_all = clip_segments(
         highlight_segments_all, DEFAULT_HIGHLIGHT_MIN_START
@@ -645,9 +759,16 @@ def compute_highlight_segments(
         s_clip = max(s, DEFAULT_HIGHLIGHT_MIN_START)
         clipped_fit_lines.append((slope, s_clip, e, b))
     fit_lines = clipped_fit_lines
-    pwm_events_plot = clip_segments(pwm_events, DEFAULT_HIGHLIGHT_MIN_START)
     pwm_positive_plot = clip_segments(pwm_positive_plot, DEFAULT_HIGHLIGHT_MIN_START)
-    return pwm_events_plot, pwm_positive_plot, highlight_segments_all, fit_lines
+    return (
+        pwm_events_plot,
+        pwm_positive_plot,
+        highlight_segments_all,
+        fit_lines,
+        yellow_segments,
+        accel_pos_segments,
+        accel_neg_segments,
+    )
 
 
 def find_pwm_events(
@@ -819,6 +940,74 @@ def analytic_drag_forces(
     rk = np.roll(ri, -1)
     forces = -2.0 * water_rho * rj * rk * np.abs(vel_b) * vel_b
     return forces
+
+
+def compute_thruster_force_x(
+    t_pwm: np.ndarray,
+    force_values: np.ndarray,
+    name_to_idx: Dict[str, int],
+    t_vel: np.ndarray,
+    axes: Dict[str, np.ndarray],
+) -> Dict[str, np.ndarray]:
+    force_x: Dict[str, np.ndarray] = {}
+    for name, axis in axes.items():
+        idx = name_to_idx.get(name)
+        if idx is None:
+            continue
+        interp = interpolate_series(t_pwm, force_values[:, idx], t_vel)
+        force_x[name] = interp * float(axis[0])
+    return force_x
+
+
+def collect_front_rear_samples(
+    times: np.ndarray,
+    highlight_segments: List[Tuple[float, float]],
+    fit_lines: List[Tuple[float, float, float, float]],
+    rear_force_x: np.ndarray,
+    front_force_x: np.ndarray,
+    drag_x: np.ndarray,
+    mass: float,
+) -> List[Tuple[float, float, float, float]]:
+    samples: List[Tuple[float, float, float, float]] = []
+    for slope, fit_start, fit_end, _ in fit_lines:
+        seg = find_overlapping_segment((fit_start, fit_end), highlight_segments)
+        if seg is None:
+            continue
+        seg_start, seg_end = seg
+        mask = (times >= seg_start) & (times <= seg_end)
+        if not np.any(mask):
+            continue
+        true_force = float(slope) * float(mass)
+        rear_mean = float(np.nanmean(rear_force_x[mask]))
+        front_mean = float(np.nanmean(front_force_x[mask]))
+        drag_mean = float(np.nanmean(drag_x[mask]))
+        samples.append((true_force, rear_mean, front_mean, drag_mean))
+    return samples
+
+
+def fit_front_rear_coeffs(
+    samples: List[Tuple[float, float, float, float]]
+) -> Optional[Tuple[float, float]]:
+    if len(samples) < 2:
+        return None
+    y = np.array([s[0] - s[3] for s in samples], dtype=float)
+    x = np.array([[s[1], s[2]] for s in samples], dtype=float)
+    coeffs, _, _, _ = np.linalg.lstsq(x, y, rcond=None)
+    return float(coeffs[0]), float(coeffs[1])
+
+
+def mse_for_coeffs(
+    samples: List[Tuple[float, float, float, float]],
+    coeffs: Tuple[float, float],
+) -> Optional[float]:
+    if not samples:
+        return None
+    k_rear, k_front = coeffs
+    errs = []
+    for true_force, rear_force, front_force, drag_force in samples:
+        pred = k_rear * rear_force + k_front * front_force + drag_force
+        errs.append((pred - true_force) ** 2)
+    return float(np.mean(errs)) if errs else None
 
 
 def load_drag_log(path: Path) -> Tuple[np.ndarray, np.ndarray]:
@@ -1521,7 +1710,7 @@ def plot_trajectory_with_vectors(
         ax.set_xlabel("Xb [m]")
         ax.set_ylabel("Yb [m]")
         ax.set_zlabel("Zb [m]")
-        ax.set_title(f"Forward Test{test_id:04d} Trajectory + Body-Frame Velocity")
+        ax.set_title(f"{MODE_LABEL} Test{test_id:04d} Trajectory + Body-Frame Velocity")
         ax.grid(True)
 
         pos_for_vel = positions_b[:-1]
@@ -1561,7 +1750,7 @@ def plot_trajectory_with_vectors(
     ax.scatter(positions_b[0, 0], positions_b[0, 1], s=40, marker="o", label="start")
     ax.set_xlabel("Xb [m]")
     ax.set_ylabel("Yb [m]")
-    ax.set_title(f"Forward Test{test_id:04d} Trajectory + Body-Frame Velocity (XY)")
+    ax.set_title(f"{MODE_LABEL} Test{test_id:04d} Trajectory + Body-Frame Velocity (XY)")
     ax.grid(True)
 
     pos_for_vel = positions_b[:-1]
@@ -1618,9 +1807,9 @@ def parse_tests_arg(tests_arg: str) -> Optional[List[int]]:
         try:
             val = int(part)
         except ValueError as exc:
-            raise ValueError(f"Invalid test id '{part}'. Use 1-5 or 'all'.") from exc
-        if val < 1 or val > 5:
-            raise ValueError(f"Test id {val} out of range. Use 1-5.")
+            raise ValueError(f"Invalid test id '{part}'. Use comma-separated ints or 'all'.") from exc
+        if val < 1:
+            raise ValueError(f"Test id {val} out of range. Must be >= 1.")
         ids.append(val)
     return sorted(set(ids))
 
@@ -1634,7 +1823,13 @@ def load_start_times(prefix: str) -> Dict[int, float]:
     for k, v in raw.items():
         if k.startswith(prefix):
             run_id = int(k.replace(prefix, ""))
-            out[run_id] = float(v)
+            try:
+                val = float(v)
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(val):
+                continue
+            out[run_id] = val
     return out
 
 
@@ -1655,6 +1850,39 @@ def discover_run_ids_from_bags(base_dir: Path, bag_prefix: str) -> List[int]:
         if match:
             runs.append(int(match.group(1)))
     return sorted(set(runs))
+
+
+def build_run_mapping_ordered(
+    base_dir: Path,
+    bag_prefix: str,
+    excluded_tests: Optional[set] = None,
+) -> Dict[int, int]:
+    tests = discover_test_ids(base_dir)
+    runs = discover_run_ids_from_bags(base_dir, bag_prefix)
+    if len(runs) != len(tests):
+        raise ValueError(
+            f"Run/test count mismatch in {base_dir}: {len(runs)} runs vs {len(tests)} tests."
+        )
+    mapping = {run_id: test_id for run_id, test_id in zip(runs, tests)}
+    if excluded_tests:
+        mapping = {
+            run_id: test_id
+            for run_id, test_id in mapping.items()
+            if test_id not in excluded_tests
+        }
+    if not mapping:
+        label = sorted(excluded_tests) if excluded_tests else []
+        raise ValueError(f"No valid runs remain after excluding {label}.")
+    return mapping
+
+
+def find_bag_path(base_dir: Path, bag_prefix: str, run_id: int) -> Path:
+    matches = sorted(base_dir.glob(f"{bag_prefix}{run_id}*.bag"))
+    if not matches:
+        raise FileNotFoundError(
+            f"No bag found for {bag_prefix}{run_id} in {base_dir}."
+        )
+    return matches[0]
 
 
 def build_run_mapping(base_dir: Path, bag_prefix: str) -> Dict[int, int]:
@@ -1791,6 +2019,9 @@ def plot_velocity_pwm(
     pwm_names: List[str],
     highlight_segments_by_thruster: List[List[Tuple[float, float]]],
     pwm_event_segments: List[Tuple[float, float]],
+    yellow_segments: List[Tuple[float, float]],
+    accel_pos_segments: List[Tuple[float, float]],
+    accel_neg_segments: List[Tuple[float, float]],
     fit_lines: Optional[List[Tuple[float, float, float, float]]],
 ) -> plt.Figure:
     fig, axes = plt.subplots(1, 2, sharex=True, figsize=(12, 4.5))
@@ -1801,6 +2032,8 @@ def plot_velocity_pwm(
     labels = None
 
     highlight_patch = None
+    pos_patch = None
+    neg_patch = None
     pwm_patch = None
 
     for ax, thruster, highlight_segments in zip(
@@ -1819,10 +2052,18 @@ def plot_velocity_pwm(
             if pwm_patch is None:
                 pwm_patch = patch
 
-        for seg_start, seg_end in highlight_segments:
+        for seg_start, seg_end in yellow_segments:
             patch = ax.axvspan(seg_start, seg_end, color="gold", alpha=0.28, zorder=0)
             if highlight_patch is None:
                 highlight_patch = patch
+        for seg_start, seg_end in accel_pos_segments:
+            patch = ax.axvspan(seg_start, seg_end, color="tab:green", alpha=0.22, zorder=0)
+            if pos_patch is None:
+                pos_patch = patch
+        for seg_start, seg_end in accel_neg_segments:
+            patch = ax.axvspan(seg_start, seg_end, color="tab:purple", alpha=0.22, zorder=0)
+            if neg_patch is None:
+                neg_patch = patch
 
         if fit_lines:
             for slope, seg_start, seg_end, intercept in fit_lines:
@@ -1878,7 +2119,7 @@ def plot_velocity_pwm(
     for ax in axes:
         ax.set_xlabel("Time [s]")
 
-    fig.suptitle(f"Forward Test{test_id:04d} Body-Frame Velocity vs Motor rad/s")
+    fig.suptitle(f"{MODE_LABEL} Test{test_id:04d} Body-Frame Velocity vs Motor rad/s")
     if handles is None:
         h1, l1 = axes[0].get_legend_handles_labels()
         handles, labels = h1, l1
@@ -1888,15 +2129,22 @@ def plot_velocity_pwm(
             labels = labels + ["pwm>0 event"]
         if highlight_patch is not None:
             handles = handles + [highlight_patch]
-            labels = labels + ["vxb spike rise"]
+            labels = labels + ["constant velocity window"]
+        if pos_patch is not None:
+            handles = handles + [pos_patch]
+            labels = labels + ["positive slope window"]
+        if neg_patch is not None:
+            handles = handles + [neg_patch]
+            labels = labels + ["negative slope window"]
         fig.legend(handles, labels, loc="upper right")
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     return fig
 
 
 def main() -> None:
+    global BASE_DIR, START_TIMES_JSON, BAG_PREFIX, QUALY_PREFIX, MITRE_PREFIX, MODE_LABEL
     parser = argparse.ArgumentParser(
-        description="Plot Forward Curee test velocity with thruster motor rad/s."
+        description="Plot Left/Up Curee test velocity with left thruster motor rad/s."
     )
     parser.add_argument(
         "--save-dir",
@@ -1910,16 +2158,21 @@ def main() -> None:
         help="Do not display interactive plots (useful with --save-dir).",
     )
     parser.add_argument(
+        "--LeftOn",
+        action="store_true",
+        help="Use MITRE/Left data (default: MITRE/Up).",
+    )
+    parser.add_argument(
         "--run-id",
         type=int,
         default=None,
-        help="Curee test id to plot (default: all tests in MITRE/Forward).",
+        help="Run id (bag index) to plot; maps to Curee Test number automatically.",
     )
     parser.add_argument(
         "--tests",
         type=str,
         default="all",
-        help="Comma-separated test ids (1-5) or 'all' (default). Overrides --run-id.",
+        help="Comma-separated run ids or 'all' (default). Overrides --run-id.",
     )
     parser.add_argument(
         "--topic",
@@ -1937,7 +2190,7 @@ def main() -> None:
         "--max-speed-slope",
         type=float,
         default=DEFAULT_MAX_SPEED_SLOPE,
-        help="Legacy (unused for highlighting; kept for compatibility).",
+        help="Maximum |d(vel)/dt| for near-constant velocity windows.",
     )
     parser.add_argument(
         "--min-segment-sec",
@@ -2014,12 +2267,26 @@ def main() -> None:
         help="Directory containing drag log JSON files.",
     )
     args = parser.parse_args()
+    if args.LeftOn:
+        BASE_DIR = LEFT_DIR
+        START_TIMES_JSON = LEFT_DIR / "startingLeftTimes.json"
+        BAG_PREFIX = "mitreLeft"
+        QUALY_PREFIX = "qualyLeft"
+        MITRE_PREFIX = "mitreLeft"
+        MODE_LABEL = "Left"
+    else:
+        BASE_DIR = UP_DIR
+        START_TIMES_JSON = UP_DIR / "startingUpTimes.json"
+        BAG_PREFIX = "mitreUp"
+        QUALY_PREFIX = "qualyUp"
+        MITRE_PREFIX = "mitreUp"
+        MODE_LABEL = "Up"
 
     if args.save_dir:
         args.save_dir.mkdir(parents=True, exist_ok=True)
 
-    qualy_starts = load_start_times(prefix="qualyForward")
-    mitre_starts = load_start_times(prefix="mitreForward")
+    qualy_starts = load_start_times(prefix=QUALY_PREFIX)
+    mitre_starts = load_start_times(prefix=MITRE_PREFIX)
 
     tests_filter = None
     try:
@@ -2028,37 +2295,57 @@ def main() -> None:
         print(f"[ERROR] {exc}")
         return
 
-    tests = collect_tests(BASE_DIR, args.run_id)
-    if tests_filter is not None:
-        tests = [item for item in tests if item[0] in tests_filter]
-    if not tests:
-        print("[WARN] No Curee Test JSON files found.")
-        return
-
     try:
-        test_to_bag = build_test_to_bag(BASE_DIR, BAG_PREFIX)
+        if args.LeftOn:
+            run_to_test = build_run_mapping_ordered(
+                BASE_DIR, BAG_PREFIX, excluded_tests=LEFT_EXCLUDED_TEST_IDS
+            )
+        else:
+            run_to_test = build_run_mapping_ordered(
+                BASE_DIR, BAG_PREFIX, excluded_tests=UP_EXCLUDED_TEST_IDS
+            )
     except ValueError as exc:
         print(f"[WARN] {exc}")
         return
 
+    run_ids = sorted(run_to_test.keys())
+
+    if args.run_id is not None:
+        if args.run_id not in run_to_test:
+            valid = ", ".join(str(r) for r in sorted(run_to_test.keys()))
+            print(f"[WARN] No test mapped for run id {args.run_id}. Valid runs: {valid}")
+            return
+        run_ids = [args.run_id]
+    if tests_filter is not None:
+        run_ids = [run_id for run_id in tests_filter if run_id in run_to_test]
+    if not run_ids:
+        print("[WARN] No matching runs after filtering.")
+        return
+
     show_plots = not args.no_show
     drag_log_dir = args.drag_log_dir
-    all_force_rows: List[Tuple[float, float, Optional[float], Optional[float]]] = []
+    if drag_log_dir == UP_DIR and args.LeftOn:
+        drag_log_dir = LEFT_DIR
+    thruster_axes = thruster_axes_body()
+    all_force_samples: List[Tuple[float, float, float, float]] = []
 
-    for test_id, gt_path in tests:
+    for run_id in run_ids:
+        test_id = run_to_test[run_id]
+        gt_path = BASE_DIR / f"Curee Test{test_id:04d}.json"
         try:
             source_type, source_name, positions, freq_hz = load_positions(gt_path)
         except Exception as exc:
             print(f"[WARN] Skipping {gt_path}: {exc}")
             continue
 
-        start_gt = qualy_starts.get(test_id, 0.0)
-        if test_id not in qualy_starts:
-            print(f"[WARN] Missing qualyForward start for test {test_id}; using 0.0s")
+        start_gt = qualy_starts.get(run_id, 0.0)
+        if run_id not in qualy_starts:
+            print(f"[WARN] Missing {QUALY_PREFIX} start for run {run_id}; using 0.0s")
 
-        bag_path = test_to_bag.get(test_id)
-        if bag_path is None:
-            print(f"[WARN] No rosbag found for test {test_id:04d}; skipping PWM overlay.")
+        try:
+            bag_path = find_bag_path(BASE_DIR, BAG_PREFIX, run_id)
+        except FileNotFoundError as exc:
+            print(f"[WARN] {exc}; skipping PWM overlay.")
             continue
 
         try:
@@ -2067,9 +2354,9 @@ def main() -> None:
             print(f"[WARN] {bag_path.name}: {exc}")
             continue
 
-        start_mitre = mitre_starts.get(test_id, 0.0)
-        if test_id not in mitre_starts:
-            print(f"[WARN] Missing mitreForward start for test {test_id}; using 0.0s")
+        start_mitre = mitre_starts.get(run_id, 0.0)
+        if run_id not in mitre_starts:
+            print(f"[WARN] Missing {MITRE_PREFIX} start for run {run_id}; using 0.0s")
 
         gt_dur = ground_truth_duration_seconds(gt_path)
         pwm_dur = pwm_duration_seconds(t_pwm)
@@ -2095,7 +2382,8 @@ def main() -> None:
             continue
 
         direction_w = overall_direction(positions_trim)
-        q_wb = quat_from_two_vectors(np.array([1.0, 0.0, 0.0], dtype=float), direction_w)
+        primary_dir = primary_direction_for_mode(MODE_LABEL)
+        q_wb = quat_from_two_vectors(primary_dir, direction_w)
         positions_rel = positions_trim - positions_trim[0]
         positions_b = rotate_world_to_body(positions_rel, q_wb)
         vel_frames = compute_velocity_frames(positions_trim, freq_hz, q_wb)
@@ -2103,6 +2391,7 @@ def main() -> None:
             print(f"[WARN] {gt_path} has fewer than 2 velocity samples; skipping.")
             continue
         t_vel = np.arange(vel_frames["velocity_raw"].shape[0]) / float(freq_hz)
+        primary_vel = primary_velocity_component(vel_frames["vel_b_plot"], MODE_LABEL)
 
         (
             motor_values,
@@ -2112,21 +2401,25 @@ def main() -> None:
             _,
         ) = compute_pwm_signals(t_pwm, pwm_values, t_vel, pwm_names, args.rotor_constant)
         if driver_signal is None:
-            print(f"[WARN] Missing driver signals for test {test_id:04d}; skipping highlights.")
+            print(f"[WARN] Missing left thruster signals for test {test_id:04d}; skipping highlights.")
 
         (
             pwm_events_plot,
             pwm_positive_plot,
             highlight_segments_all,
             fit_lines,
+            yellow_segments,
+            accel_pos_segments,
+            accel_neg_segments,
         ) = compute_highlight_segments(
             t_vel,
-            vel_frames["vx_raw"],
+            primary_vel,
             driver_signal,
             min_motor=args.min_motor,
             max_motor_slope=args.max_motor_slope,
             min_duration=args.min_segment_sec,
             min_speed=args.min_speed,
+            max_speed_slope=args.max_speed_slope,
         )
         highlight_segments = highlight_segments_all.copy()
 
@@ -2140,15 +2433,26 @@ def main() -> None:
 
         highlight_segments_by_thruster = [highlight_segments.copy() for _ in PLOT_THRUSTERS]
 
-        net_force = None
-        if all(thruster in name_to_idx for thruster in PLOT_THRUSTERS):
-            idx_left = name_to_idx[PLOT_THRUSTERS[0]]
-            idx_right = name_to_idx[PLOT_THRUSTERS[1]]
-            force_left = interpolate_series(t_pwm, force_values[:, idx_left], t_vel)
-            force_right = interpolate_series(t_pwm, force_values[:, idx_right], t_vel)
-            net_force = force_left + force_right
+        force_x_by_thruster = compute_thruster_force_x(
+            t_pwm, force_values, name_to_idx, t_vel, thruster_axes
+        )
+        rear_force_x = None
+        front_force_x = None
+        if "rear_left" in force_x_by_thruster and "rear_right" in force_x_by_thruster:
+            rear_force_x = force_x_by_thruster["rear_left"] + force_x_by_thruster["rear_right"]
         else:
-            print(f"[WARN] Missing driver thrusters in PWM names for test {test_id:04d}.")
+            print(f"[WARN] Missing rear thrusters in PWM names for test {test_id:04d}.")
+        if "front_left" in force_x_by_thruster and "front_right" in force_x_by_thruster:
+            front_force_x = force_x_by_thruster["front_left"] + force_x_by_thruster["front_right"]
+        else:
+            print(f"[WARN] Missing front thrusters in PWM names for test {test_id:04d}.")
+        net_force = None
+        if rear_force_x is not None and front_force_x is not None:
+            net_force = rear_force_x + front_force_x
+
+        drag_x = analytic_drag_forces(
+            vel_frames["vel_b_plot"], args.mass, args.inertia, args.water_rho
+        )[:, 0]
 
         if net_force is not None and highlight_segments:
             verify_constant_force(
@@ -2161,7 +2465,7 @@ def main() -> None:
             )
 
         print(
-            f"[INFO] Test{test_id:04d}: {source_type} '{source_name}', "
+            f"[INFO] Run{run_id:02d} -> Test{test_id:04d}: {source_type} '{source_name}', "
             f"{len(positions)} samples @ {freq_hz:.1f} Hz"
         )
         fig = plot_velocity_pwm(
@@ -2174,6 +2478,9 @@ def main() -> None:
             pwm_names,
             highlight_segments_by_thruster,
             pwm_positive_plot,
+            yellow_segments,
+            accel_pos_segments,
+            accel_neg_segments,
             fit_lines,
         )
         fig_traj = plot_trajectory_with_vectors(
@@ -2184,12 +2491,29 @@ def main() -> None:
             highlight_segments_by_thruster,
         )
 
+        if (
+            rear_force_x is not None
+            and front_force_x is not None
+            and highlight_segments
+            and fit_lines
+        ):
+            samples = collect_front_rear_samples(
+                t_vel,
+                highlight_segments,
+                fit_lines,
+                rear_force_x,
+                front_force_x,
+                drag_x,
+                args.mass,
+            )
+            all_force_samples.extend(samples)
+
         fig_drag_highlight = None
         fig_speed_force = None
         fig_drag_components: List[plt.Figure] = []
         if net_force is not None:
             fig_speed_force = plot_speed_force_drag(
-                f"Forward Test{test_id:04d} Speed + Forces",
+                f"{MODE_LABEL} Test{test_id:04d} Speed + Forces",
                 t_vel,
                 vel_frames["speed"],
                 net_force,
@@ -2200,7 +2524,7 @@ def main() -> None:
             )
             if highlight_segments:
                 fig_drag_highlight = plot_thrust_vs_drags_highlighted(
-                    f"Forward Test{test_id:04d} Highlighted Thrust vs Drag",
+                    f"{MODE_LABEL} Test{test_id:04d} Highlighted Thrust vs Drag",
                     t_vel,
                     net_force,
                     cuboid_force,
@@ -2248,7 +2572,7 @@ def main() -> None:
             cfd_raw_t = cfd_raw_t[cfd_mask]
             cfd_raw_f = cfd_raw_f[cfd_mask]
         fig_drag_components = plot_drag_components(
-            f"Forward Test{test_id:04d} Drag Logs (Trimmed)",
+            f"{MODE_LABEL} Test{test_id:04d} Drag Logs (Trimmed)",
             cuboid_raw_t,
             cuboid_raw_f,
             cfd_raw_t,
@@ -2258,33 +2582,22 @@ def main() -> None:
         )
 
         if args.save_dir:
-            out_path = args.save_dir / f"Forward_Test{test_id:04d}_vel_pwm.png"
+            out_path = args.save_dir / f"{MODE_LABEL}_Test{test_id:04d}_vel_pwm.png"
             fig.savefig(out_path, dpi=150)
-            out_traj = args.save_dir / f"Forward_Test{test_id:04d}_traj_vectors.png"
+            out_traj = args.save_dir / f"{MODE_LABEL}_Test{test_id:04d}_traj_vectors.png"
             fig_traj.savefig(out_traj, dpi=150)
             if fig_speed_force is not None:
-                out_speed = args.save_dir / f"Forward_Test{test_id:04d}_speed_force_drag.png"
+                out_speed = args.save_dir / f"{MODE_LABEL}_Test{test_id:04d}_speed_force_drag.png"
                 fig_speed_force.savefig(out_speed, dpi=150)
             if fig_drag_highlight is not None:
-                out_highlight = args.save_dir / f"Forward_Test{test_id:04d}_thrust_drag_highlight.png"
+                out_highlight = args.save_dir / f"{MODE_LABEL}_Test{test_id:04d}_thrust_drag_highlight.png"
                 fig_drag_highlight.savefig(out_highlight, dpi=150)
             if fig_drag_components:
                 for idx, fig_drag in enumerate(fig_drag_components):
                     suffix = ["Fx", "Fy", "Fz"][idx]
-                    out_drag = args.save_dir / f"Forward_Test{test_id:04d}_drag_{suffix}.png"
+                    out_drag = args.save_dir / f"{MODE_LABEL}_Test{test_id:04d}_drag_{suffix}.png"
                     fig_drag.savefig(out_drag, dpi=150)
 
-        if net_force is not None and highlight_segments and fit_lines:
-            rows = collect_force_sample_rows(
-                t_vel,
-                highlight_segments,
-                fit_lines,
-                net_force,
-                cuboid_force,
-                cfd_force,
-                args.mass,
-            )
-            all_force_rows.extend(rows)
         if not show_plots:
             plt.close(fig)
             plt.close(fig_traj)
@@ -2295,109 +2608,18 @@ def main() -> None:
             for fig_drag in fig_drag_components:
                 plt.close(fig_drag)
 
-    if all_force_rows:
-        true_forces = [row[0] for row in all_force_rows]
-        pred_cuboid = [row[2] for row in all_force_rows if row[2] is not None]
-        pred_cfd = [row[3] for row in all_force_rows if row[3] is not None]
-
-        fig_force_dist = plot_force_distribution(
-            true_forces,
-            pred_cuboid,
-            pred_cfd,
-            "Forward Tests: Net Force Distributions",
-        )
-        fig_force_compare = plot_force_comparison(
-            [(row[0], row[2]) for row in all_force_rows if row[2] is not None],
-            [(row[0], row[3]) for row in all_force_rows if row[3] is not None],
-            "Forward Tests: True vs Predicted Net Force",
-        )
-        coeff_cub = fit_thruster_scale(all_force_rows, 2)
-        coeff_cfd = fit_thruster_scale(all_force_rows, 3)
-        cub_pairs_scaled = []
-        cfd_pairs_scaled = []
-        for true_force, thr_mean, cub_pred, cfd_pred in all_force_rows:
-            if cub_pred is not None and coeff_cub is not None:
-                cub_drag = cub_pred - thr_mean
-                cub_pairs_scaled.append((true_force, coeff_cub * thr_mean + cub_drag))
-            if cfd_pred is not None and coeff_cfd is not None:
-                cfd_drag = cfd_pred - thr_mean
-                cfd_pairs_scaled.append((true_force, coeff_cfd * thr_mean + cfd_drag))
-        fig_force_compare_scaled = plot_force_comparison_with_coeffs(
-            cub_pairs_scaled,
-            cfd_pairs_scaled,
-            coeff_cub,
-            coeff_cfd,
-            "Forward Tests: Calibrated True vs Predicted Net Force",
-        )
-        coeff_cub_quad = fit_thruster_quadratic(all_force_rows, 2)
-        coeff_cfd_quad = fit_thruster_quadratic(all_force_rows, 3)
-        cub_pairs_quad = []
-        cfd_pairs_quad = []
-        for true_force, thr_mean, cub_pred, cfd_pred in all_force_rows:
-            if cub_pred is not None and coeff_cub_quad is not None:
-                cub_drag = cub_pred - thr_mean
-                a, b = coeff_cub_quad
-                cub_pairs_quad.append((true_force, a * thr_mean**2 + b * thr_mean + cub_drag))
-            if cfd_pred is not None and coeff_cfd_quad is not None:
-                cfd_drag = cfd_pred - thr_mean
-                a, b = coeff_cfd_quad
-                cfd_pairs_quad.append((true_force, a * thr_mean**2 + b * thr_mean + cfd_drag))
-
-        mse_cub_lin = compute_mse(cub_pairs_scaled)
-        mse_cfd_lin = compute_mse(cfd_pairs_scaled)
-        mse_cub_quad = compute_mse(cub_pairs_quad)
-        mse_cfd_quad = compute_mse(cfd_pairs_quad)
-        if mse_cub_lin is not None:
-            print(f"[INFO] MSE cuboid calibrated (linear): {mse_cub_lin:.4f}")
-        if mse_cub_quad is not None:
-            print(f"[INFO] MSE cuboid quadratic: {mse_cub_quad:.4f}")
-        if mse_cfd_lin is not None:
-            print(f"[INFO] MSE CFD calibrated (linear): {mse_cfd_lin:.4f}")
-        if mse_cfd_quad is not None:
-            print(f"[INFO] MSE CFD quadratic: {mse_cfd_quad:.4f}")
-        fig_force_compare_quad = plot_force_comparison_with_quadratic(
-            cub_pairs_quad,
-            cfd_pairs_quad,
-            coeff_cub_quad,
-            coeff_cfd_quad,
-            "Forward Tests: Quadratic Calibrated True vs Predicted Net Force",
-        )
-        fig_force_dist_quad = plot_force_distribution_calibrated(
-            true_forces,
-            [pair[1] for pair in cub_pairs_quad],
-            [pair[1] for pair in cfd_pairs_quad],
-            coeff_cub_quad,
-            coeff_cfd_quad,
-            "Forward Tests: Quadratic Calibrated Net Force Distributions",
-        )
-        fig_force_dist_scaled = plot_force_distribution_calibrated(
-            true_forces,
-            [pair[1] for pair in cub_pairs_scaled],
-            [pair[1] for pair in cfd_pairs_scaled],
-            coeff_cub,
-            coeff_cfd,
-            "Forward Tests: Calibrated Net Force Distributions",
-        )
-        if args.save_dir:
-            out_dist = args.save_dir / "Forward_AllTests_force_distribution.png"
-            fig_force_dist.savefig(out_dist, dpi=150)
-            out_compare = args.save_dir / "Forward_AllTests_force_comparison.png"
-            fig_force_compare.savefig(out_compare, dpi=150)
-            out_compare_scaled = args.save_dir / "Forward_AllTests_force_comparison_calibrated.png"
-            fig_force_compare_scaled.savefig(out_compare_scaled, dpi=150)
-            out_compare_quad = args.save_dir / "Forward_AllTests_force_comparison_quadratic.png"
-            fig_force_compare_quad.savefig(out_compare_quad, dpi=150)
-            out_dist_quad = args.save_dir / "Forward_AllTests_force_distribution_quadratic.png"
-            fig_force_dist_quad.savefig(out_dist_quad, dpi=150)
-            out_dist_scaled = args.save_dir / "Forward_AllTests_force_distribution_calibrated.png"
-            fig_force_dist_scaled.savefig(out_dist_scaled, dpi=150)
-        if not show_plots:
-            plt.close(fig_force_dist)
-            plt.close(fig_force_compare)
-            plt.close(fig_force_compare_scaled)
-            plt.close(fig_force_compare_quad)
-            plt.close(fig_force_dist_scaled)
-            plt.close(fig_force_dist_quad)
+    if all_force_samples:
+        coeffs = fit_front_rear_coeffs(all_force_samples)
+        if coeffs is None:
+            print("[WARN] Not enough samples to fit front/rear coefficients.")
+        else:
+            k_rear, k_front = coeffs
+            mse = mse_for_coeffs(all_force_samples, coeffs)
+            print(
+                f"[INFO] Fitted coefficients: k_rear={k_rear:.4f}, k_front={k_front:.4f}"
+            )
+            if mse is not None:
+                print(f"[INFO] Fit MSE: {mse:.4f}")
 
     if show_plots:
         plt.show()

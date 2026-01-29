@@ -445,6 +445,97 @@ class HydrodynamicForceModels:
     torques = torques_linear + torques_angular
     return forces, torques
 
+  def _predict_steady_drag_components(
+    self,
+    root_linvels_b: torch.tensor,
+    root_angvels_b: torch.tensor,
+  ) -> Tuple[torch.tensor, torch.tensor, torch.tensor, torch.tensor]:
+    """Predict linear/angular force/torque components with steady-state MLP models."""
+    self._ensure_steady_models_loaded()
+
+    lin_np = root_linvels_b.detach().to('cpu').numpy()
+    ang_np = root_angvels_b.detach().to('cpu').numpy()
+    lin_std_np = self._steady_scaler_X_linear.transform(lin_np)
+    ang_std_np = self._steady_scaler_X_angular.transform(ang_np)
+    lin_std = torch.from_numpy(lin_std_np).to(self.device).type_as(root_linvels_b)
+    ang_std = torch.from_numpy(ang_std_np).to(self.device).type_as(root_angvels_b)
+
+    with torch.no_grad():
+      pred_lin_std = self._steady_linear_model(lin_std)
+      pred_ang_std = self._steady_angular_model(ang_std)
+
+    pred_lin_std_np = pred_lin_std.detach().to('cpu').numpy()
+    pred_ang_std_np = pred_ang_std.detach().to('cpu').numpy()
+    pred_lin_np = self._steady_scaler_y_linear.inverse_transform(pred_lin_std_np)
+    pred_ang_np = self._steady_scaler_y_angular.inverse_transform(pred_ang_std_np)
+
+    pred_lin = torch.from_numpy(pred_lin_np).to(self.device).type_as(root_linvels_b)
+    pred_ang = torch.from_numpy(pred_ang_np).to(self.device).type_as(root_angvels_b)
+
+    forces_linear = pred_lin[:, :3] * 1000
+    torques_linear = pred_lin[:, 3:] * 1000
+    forces_angular = pred_ang[:, :3] * 1000
+    torques_angular = pred_ang[:, 3:] * 1000
+    return forces_linear, torques_linear, forces_angular, torques_angular
+
+  def _predict_transient_drag_components(
+    self,
+    root_linvels_b: torch.tensor,
+    root_angvels_b: torch.tensor,
+  ) -> Tuple[torch.tensor, torch.tensor, torch.tensor, torch.tensor]:
+    """Predict linear/angular force/torque components with transient transformer models."""
+    self._ensure_transient_models_loaded()
+
+    lin_np = root_linvels_b.detach().to('cpu').numpy().astype(np.float32)
+    ang_np = root_angvels_b.detach().to('cpu').numpy().astype(np.float32)
+    self._ensure_transient_buffers(lin_np, ang_np)
+
+    X_lin = self._build_transient_features(self._linvel_history, self._transient_scaler_X_linear)
+    X_ang = self._build_transient_features(self._angvel_history, self._transient_scaler_X_angular)
+    X_lin_scaled = self._transient_scaler_X_linear.transform(X_lin.reshape(-1, X_lin.shape[2])).reshape(X_lin.shape)
+    X_ang_scaled = self._transient_scaler_X_angular.transform(X_ang.reshape(-1, X_ang.shape[2])).reshape(X_ang.shape)
+
+    lin_tensor = torch.from_numpy(X_lin_scaled).to(self.device).type_as(root_linvels_b)
+    ang_tensor = torch.from_numpy(X_ang_scaled).to(self.device).type_as(root_angvels_b)
+
+    with torch.no_grad():
+      pred_lin_std = self._transient_linear_model(lin_tensor)
+      pred_ang_std = self._transient_angular_model(ang_tensor)
+
+    pred_lin_std_np = pred_lin_std.detach().to('cpu').numpy()
+    pred_ang_std_np = pred_ang_std.detach().to('cpu').numpy()
+    pred_lin_np = self._transient_scaler_y_linear.inverse_transform(pred_lin_std_np)
+    pred_ang_np = self._transient_scaler_y_angular.inverse_transform(pred_ang_std_np)
+
+    pred_lin = torch.from_numpy(pred_lin_np).to(self.device).type_as(root_linvels_b)
+    pred_ang = torch.from_numpy(pred_ang_np).to(self.device).type_as(root_angvels_b)
+
+    forces_linear = pred_lin[:, :3] * 1000
+    torques_linear = pred_lin[:, 3:] * 1000
+    forces_angular = pred_ang[:, :3] * 1000
+    torques_angular = pred_ang[:, 3:] * 1000
+    return forces_linear, torques_linear, forces_angular, torques_angular
+
+  def predict_drag_components(
+    self,
+    root_quats_w: torch.tensor,
+    root_linvels_w: torch.tensor,
+    root_angvels_w: torch.tensor,
+  ) -> Tuple[torch.tensor, torch.tensor, torch.tensor, torch.tensor, torch.tensor, torch.tensor]:
+    """Return linear/angular NN drag components along with body-frame velocities."""
+    root_quats_b = quat_conjugate(root_quats_w)
+    root_linvels_b = quat_apply(root_quats_b, root_linvels_w)
+    root_angvels_b = quat_apply(root_quats_b, root_angvels_w)
+    if self.use_transient_models:
+      forces_linear, torques_linear, forces_angular, torques_angular = (
+        self._predict_transient_drag_components(root_linvels_b, root_angvels_b)
+      )
+    else:
+      forces_linear, torques_linear, forces_angular, torques_angular = (
+        self._predict_steady_drag_components(root_linvels_b, root_angvels_b)
+      )
+    return forces_linear, torques_linear, forces_angular, torques_angular, root_linvels_b, root_angvels_b
+
   def calculate_quadratic_drag_forces(self,
                                   root_linvels_b: torch.tensor,
                                   root_angvels_b: torch.tensor,
@@ -466,8 +557,8 @@ class HydrodynamicForceModels:
     rj = torch.roll(ri, 1, 1)
     rk = torch.roll(ri, -1, 1)
 
-    #forces = -2. * fluid_density_rho * rj * rk * torch.abs(root_linvels_b) * root_linvels_b
-    #torques = -0.5 * fluid_density_rho * ri * (torch.pow(rj,4) + torch.pow(rk,4)) * torch.abs(root_angvels_b) * root_angvels_b
+    forces = -2. * fluid_density_rho * rj * rk * torch.abs(root_linvels_b) * root_linvels_b
+    torques = -0.5 * fluid_density_rho * ri * (torch.pow(rj,4) + torch.pow(rk,4)) * torch.abs(root_angvels_b) * root_angvels_b
 
     return (forces, torques)
 
@@ -494,8 +585,8 @@ class HydrodynamicForceModels:
 
     forces_zero = torch.zeros_like(forces)
     torques_zero = torch.zeros_like(torques)
-    return (forces_zero, torques_zero)
-    # return (forces, torques)
+    # return (forces_zero, torques_zero)
+    return (forces, torques)
 
   def calculate_density_and_viscosity_forces(self, 
                                              root_quats_w: torch.tensor,

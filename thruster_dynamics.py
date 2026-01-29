@@ -29,14 +29,43 @@ def get_thruster_com_and_orientations(device):
     return shift, r
 
   # TODO: think about the format of this, get rid of helper functions
+  # commented out; uncommented values below are from actual CUREE 1 vehicle
+  # x = 0.16
+  # y = 0.000
+  # z_pitch = 0.13
+  # z_rear = 0.13
+  # z_front = 0.13
+  # thruster_info = dict(
+  #   drive_left=create_tf_quat(-0.4127 + x, .1506 + y, -0.0889 + z_pitch, 1,0,0,0),
+  #   drive_right = create_tf_quat(-0.4127 + x,-.1506 + y,-0.0889 + z_pitch,1,0,0,0),
+  #   rear_left = create_tf_rpy(-0.303 + x, 0.1461 + y, -0.1587 + z_rear, 0, -0.785398, 1.5708),
+  #   rear_right = create_tf_rpy(-0.303 + x, -0.1461 + y, -0.1587+ z_rear, 0, -0.785398, -1.5708),
+  #   front_right = create_tf_rpy(0.0585 + x, -0.1461 + y, -0.0540 + z_front, 0, 0.785398,-1.5708),
+  #   front_left = create_tf_rpy(0.0585 + x, 0.1461 + y, -0.0540 + z_front, 0, 0.785398, 1.5708),
+  # )
+
+  # x = 0.16
+  # y = 0.000
+
+  # these values are calculated in measurement frame
+  # second value is temporary test value in x
+  correct_DL_shift_x = -0.2593
+  correct_DL_shift_y = .1506
+  correct_DL_shift_z = -0.007
+
+
+  z_adjust = 0
+  x_adjust = 0
+
   thruster_info = dict(
-    drive_left=create_tf_quat(-0.4127, .1506, -0.0889, 1,0,0,0),
-    drive_right = create_tf_quat(-0.4127,-.1506,-0.0889,1,0,0,0),
-    rear_left = create_tf_rpy(-0.303, 0.1461, -0.1587, 0, -0.785398, 1.5708),
-    rear_right = create_tf_rpy(-0.303, -0.1461, -0.1587, 0, -0.785398, -1.5708),
-    front_right = create_tf_rpy(0.0585, -0.1461, -0.0540, 0, 0.785398,-1.5708),
-    front_left = create_tf_rpy(0.0585, 0.1461, -0.0540, 0, 0.785398, 1.5708),
+    drive_left=create_tf_quat(correct_DL_shift_x, correct_DL_shift_y, correct_DL_shift_z, 1,0,0,0),
+    drive_right = create_tf_quat(correct_DL_shift_x, -correct_DL_shift_y, correct_DL_shift_z,1,0,0,0),
+    rear_left = create_tf_rpy(correct_DL_shift_x + .114 + x_adjust, correct_DL_shift_y, correct_DL_shift_z -.115 + z_adjust, 0, -0.785398, 1.5708),
+    rear_right = create_tf_rpy(correct_DL_shift_x + .114 + x_adjust, -correct_DL_shift_y, correct_DL_shift_z -.115 + z_adjust, 0, -0.785398, -1.5708),
+    front_right = create_tf_rpy(correct_DL_shift_x + .468 + x_adjust, -correct_DL_shift_y, correct_DL_shift_z + .068 + z_adjust, 0, 0.785398,-1.5708),
+    front_left = create_tf_rpy(correct_DL_shift_x + .468 + x_adjust, correct_DL_shift_y, correct_DL_shift_z + .068 +z_adjust, 0, 0.785398, 1.5708),
   )
+
   # vector pointing from com->thruster location (thruster, 3)
   # THRUSTER ORDERING IS 
   # 0 - drive_left
@@ -63,6 +92,7 @@ def get_thruster_com_and_orientations(device):
     [thruster_info["front_left"][1][0], thruster_info["front_left"][1][1], thruster_info["front_left"][1][2], thruster_info["front_left"][1][3]],
     [thruster_info["front_right"][1][0], thruster_info["front_right"][1][1], thruster_info["front_right"][1][2], thruster_info["front_right"][1][3]]
   ], dtype=torch.float32, device=device, requires_grad=False)
+
   return thruster_com_offsets, thruster_quats
 
 
@@ -113,7 +143,7 @@ class DynamicsFirstOrder(Dynamics):
     #print(dt, alpha, self.state)
 
     self.state = self.state * alpha.unsqueeze(-1) + (1.0 - alpha).unsqueeze(-1) * cmd
-    assert torch.any(self.state == cmd)
+    # assert torch.any(self.state == cmd)
 
     self.prevTime = t
     return self.state
